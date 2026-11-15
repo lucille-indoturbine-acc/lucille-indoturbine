@@ -1,0 +1,2106 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+
+  /* Motion system — Apple-style easing curves */
+  --ease-ios: cubic-bezier(0.32, 0.72, 0, 1); /* iOS sheet/nav curve */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1); /* fast start, long soft landing */
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1); /* gentle overshoot */
+  --ease-gentle: cubic-bezier(0.25, 0.1, 0.25, 1);
+  /* Long fills and draws only — the gauge arc and the meter segments.
+     `--ease-out-expo` covers ~90% of its distance in the first third of its
+     duration, which is exactly right for a card that should arrive and settle,
+     and exactly wrong for anything that runs past ~0.6s: the ring snapped
+     almost full and then crawled, so a longer duration read as a stall rather
+     than as care. This one is symmetric — it leaves gently, moves through the
+     middle, and lands soft, so a slow sweep looks deliberate the whole way.
+     Short entrances keep `--ease-out-expo`; see lib/design.ts rule 2. */
+  --ease-draw: cubic-bezier(0.65, 0, 0.35, 1);
+  --background: #f9fafb;
+  --foreground: #171717;
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  /* ACTION — one blue for everything that COMMITS something. Locked 8 Sep 2026,
+     after the app was found asking for the same thing in three colours: black
+     (`bg-foreground`) through the planner, blue-600 on Save PDF and the confirm
+     dialog, and --chart-1 on the dashboard's empty state. The last one was the
+     worst: --chart-1 means ACTUAL on every curve in this app, so a button
+     wearing it claimed to be a measurement.
+
+     blue-700 rather than blue-500/600 because white on it is 7.0:1 — it clears
+     the NORMAL-text bar, not just the large-text one, which is what a screen
+     read by 22- to 60-year-olds needs; and the deeper face reads as chosen
+     rather than as a framework default. Do not lighten this without
+     re-measuring: blue-600 is 5.2:1 and blue-500 only 3.7:1. */
+  --primary: #1d4ed8;
+  --primary-foreground: #ffffff;
+  --primary-hover: #1e40af;  /* blue-800 — hover/press, still 8.6:1 */
+  --primary-soft: #eff6ff;   /* blue-50  — its tinted ground */
+
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  /* TRACK — the ground a tab row sits on, and the ONLY reason it is not
+     --muted: at oklch(0.97) the strip was the same value as the page behind
+     it and the white pill inside it was invisible, which is the "nyaru"
+     reported on 10 September 2026. A tab row has to read as a row before it
+     can say which tab is active, so its ground is a step darker than any card
+     and the pill on it stays --background. Deliberately NOT --primary: blue in
+     this app means an action that COMMITS (see the block above), and the Save
+     as PDF button sits on the very same row. */
+  --track: oklch(0.925 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  /* The focus ring is the action colour: a grey ring around a blue button
+     reads as a rendering artefact rather than as focus. */
+  --ring: #1d4ed8;
+  /* The five chart slots shadcn ships arrive as a grey ramp, which is why every
+     chart here used to invent its own colours. They now carry the meanings this
+     app actually has, so a chart picks a role rather than a colour. 1 and 2 are
+     the measurement pair and are not negotiable: actual is blue, plan is red, on
+     every line, bar and tick. 3/4/5 are states, never verdicts. */
+  --chart-1: #3b82f6; /* actual  — blue-500 */
+  --chart-2: #ef4444; /* plan    — red-500 */
+  --chart-3: #10b981; /* done    — emerald-500 */
+  --chart-4: #f59e0b; /* at risk — amber-500 */
+  --chart-5: #94a3b8; /* dormant — slate-400 */
+
+  /* PLAN GROUPS — the Gantt's categorical palette, and it is deliberately NOT
+     --chart-1..5. Those five already mean actual, plan, done, at risk and
+     dormant everywhere else in this app; reusing them here would have a bar
+     colour claim a measurement that the planner does not make.
+
+     Six hues, fixed order, never cycled: a seventh group is drawn neutral
+     rather than repeating a colour and claiming two packages are one. Every
+     value below passed the six checks (lightness band, chroma floor, adjacent
+     CVD separation, normal-vision floor, contrast >= 3:1 on this surface).
+
+     No dark-mode steps on purpose. The -400 and -500 ramps both FAILED the
+     lightness band against the dormant dark surface, and this app is light by
+     decision — whoever turns dark on validates these then rather than shipping
+     colours nobody checked. */
+  --plan-1: #4f46e5; /* indigo-600  */
+  --plan-2: #0d9488; /* teal-600    */
+  --plan-3: #c026d3; /* fuchsia-600 */
+  --plan-4: #ea580c; /* orange-600  */
+  --plan-5: #0284c7; /* sky-600     */
+  --plan-6: #65a30d; /* lime-600    */
+  /* Four more for the Bars menu only (8 Oct 2026, he wanted two full rows of
+     swatches). Never a package's default: packages still take 1-6. No red,
+     amber or yellow: those are the forecast's and the target's. */
+  --plan-7: #7c3aed; /* violet-600  */
+  --plan-8: #db2777; /* pink-600    */
+  --plan-9: #15803d; /* green-700   */
+  --plan-10: #1e3a8a; /* blue-900, navy */
+  /* VERDICT — the only two colours allowed to say whether the news is good.
+     Kept apart from the chart ramp on purpose: --chart-1/2 answer "which line
+     is this", these answer "is this all right". Every ahead/behind figure and
+     chip in the app reads from here, so the green in the hero is the same
+     green as the one in a table cell. */
+  --ok: #059669;      /* emerald-600 — on or ahead of plan */
+  --ok-soft: #d1fae5; /* its tinted ground for chips */
+  --bad: #dc2626;     /* red-600 — behind plan */
+  --bad-soft: #fee2e2;
+  --warn: #b45309;    /* amber-700 — needs attention, not yet a failure */
+  --warn-soft: #fef3c7;
+  /* META — what a row STATES about itself (how many activities it holds, what
+     it is worth), as against the figures that say how it is DOING. Those two
+     kinds of number sit on the same line and had the same grey, which is how
+     the weight of a heading ended up being the hardest thing on the map to
+     find.
+
+     Indigo because it is the one hue this app owns that means nothing HERE.
+     Every other colour is spoken for: blue is actual, red is plan, emerald is
+     done, amber is at risk, slate is dormant, and the verdict pair answers
+     whether the news is good. --plan-1 is this same indigo in the planner's
+     Gantt, where it names the first package — a different screen, and a
+     categorical name rather than a measurement, so nothing on Data Overall can
+     read a meta pill as a figure about progress. A seventh invented hue would
+     have been a second palette, which this file does not have. */
+  --meta: #4338ca;        /* indigo-700 — the word */
+  --meta-strong: #312e81; /* indigo-900 — the figure, which is what is read */
+  --meta-soft: #eef2ff;   /* indigo-50  — its ground */
+  /* TO CHECK — the fourth reminder over Data Overall's map, beside late
+     (amber), ending soon (blue) and will slip (red): data somebody has to
+     look at. Violet because the three beside it are spoken for and a white
+     button read as nothing to see; picked from rendered variants on 28 Sep
+     2026, the one hue added to this file since the note above. */
+  --check: #6d28d9;      /* violet-700 */
+  --check-soft: #ede9fe; /* violet-100 */
+  /* IDENTITY, NOT VERDICT. The weekly stat row colours its four figures so they
+     are told apart at a glance instead of read one label at a time; Plan and
+     Actual reuse --chart-2/--chart-1 so that row teaches the same pair as the
+     S-Curve. Deviation needs a fourth colour that is neither of those nor the
+     green beside them, and --warn reads brown at 30px.
+     yellow-600 is the brightest TRUE yellow that stays legible on a white card:
+     2.94:1, against the 3:1 bar for large text (this figure is 24–30px
+     semibold). yellow-500 is 1.92:1 and yellow-400 is 1.53:1 — both unreadable
+     here, so do not "brighten" this without re-measuring. */
+  --deviation: #ca8a04;
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-inter), "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  /* Expose easings as Tailwind utilities: ease-ios, ease-out-expo, ease-spring */
+  --ease-ios: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --font-heading: var(--font-inter), "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-plan-1: var(--plan-1);
+  --color-plan-2: var(--plan-2);
+  --color-plan-3: var(--plan-3);
+  --color-plan-4: var(--plan-4);
+  --color-plan-5: var(--plan-5);
+  --color-plan-6: var(--plan-6);
+  --color-plan-7: var(--plan-7);
+  --color-plan-8: var(--plan-8);
+  --color-plan-9: var(--plan-9);
+  --color-plan-10: var(--plan-10);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-meta: var(--meta);
+  --color-meta-strong: var(--meta-strong);
+  --color-meta-soft: var(--meta-soft);
+  --color-check: var(--check);
+  --color-check-soft: var(--check-soft);
+  --color-deviation: var(--deviation);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-track: var(--track);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-soft: var(--primary-soft);
+
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+html {
+  scroll-behavior: smooth;
+  font-family: var(--font-sans);
+  /* THE APP IS LIGHT (see app/layout.tsx), and this is what tells the BROWSER
+     so. Without it a phone whose OS is in dark mode renders every control the
+     UA draws itself — the `<select>` popup and its option list, `type="date"`
+     and `type="time"` pickers, autofill sheets, spinners, scrollbars — from
+     the dark palette, on top of a page that stayed white. Nine components use
+     a native `<select>` (the Radix-per-screen rule sends every list over ~20
+     rows to native elements) and the Daily form uses native date/time inputs,
+     so this is not a corner case: it is most of the form surface of the app,
+     unreadable on a device that is merely set the way most phones ship.
+     Delete this line the day a ThemeProvider goes in, not before. */
+  color-scheme: light;
+}
+
+/* Full screen on a desktop: see lib/fit-screen.ts. `--z` is the zoom in
+   force (1 otherwise). Zoom multiplies viewport units too, so a height written
+   in vh/dvh divides by `--z`, or a 100dvh box comes out taller than the screen. */
+:root {
+  --z: 1;
+}
+/* An account with no access to this page: <main> stays unpainted until
+   AccessGate's cover is up (lib/access-lock.ts). */
+html[data-locked] main {
+  visibility: hidden;
+}
+/* ...and its No access sidebar rows never paint (data-deny lists the areas).
+   The Reports group goes only when both its rows do. */
+html[data-deny~="dashboard"] [data-area="dashboard"],
+html[data-deny~="overall"] [data-area="overall"],
+html[data-deny~="weekly"] [data-area="weekly"],
+html[data-deny~="daily"] [data-area="daily"],
+html[data-deny~="dokumen"] [data-area="dokumen"],
+html[data-deny~="projects"] [data-area="projects"],
+html[data-deny~="roles"] [data-area="roles"],
+html[data-deny~="weekly"][data-deny~="daily"] [data-area="weekly daily"] {
+  display: none;
+}
+@media screen and (min-width: 1024px) {
+  html[data-fit] {
+    --z: var(--fit-zoom, 1);
+  }
+  html[data-fit] body {
+    zoom: var(--z);
+    padding-left: 48px;
+  }
+  html[data-fit] aside[data-app-chrome] {
+    display: none;
+  }
+  html[data-fit] .fit-exit {
+    display: block;
+    position: fixed;
+    top: 12px;
+    left: 8px;
+    z-index: 40;
+    /* The page is zoomed, the logo and button are not: they stay small. */
+    zoom: calc(1 / var(--z));
+  }
+}
+
+/* The toggle's motion (lib/fit-screen.ts): named only while it runs, so route
+   transitions are untouched. The page morphs from its old box to the zoomed
+   one; the sidebar and the exit column fade. */
+html[data-fitting] main {
+  view-transition-name: fit-main;
+}
+html[data-fitting] aside[data-app-chrome] {
+  view-transition-name: fit-aside;
+}
+html[data-fitting] .fit-exit {
+  view-transition-name: fit-exit;
+}
+::view-transition-group(fit-main),
+::view-transition-old(fit-aside),
+::view-transition-new(fit-aside),
+::view-transition-old(fit-exit),
+::view-transition-new(fit-exit) {
+  animation-duration: 420ms;
+  animation-timing-function: var(--ease-ios);
+}
+::view-transition-old(fit-main),
+::view-transition-new(fit-main) {
+  height: 100%;
+  animation-duration: 420ms;
+  animation-timing-function: var(--ease-ios);
+}
+
+body {
+  -webkit-tap-highlight-color: transparent;
+  font-family: var(--font-sans);
+}
+
+/* Form controls and SVG text don't always inherit the document font —
+   force them onto Inter so every piece of UI shares one typeface. */
+button,
+input,
+select,
+textarea,
+svg text {
+  font-family: inherit;
+}
+
+/* Interactive elements share the iOS timing curve by default, so every
+   hover/focus/press feels like it belongs to one motion language. */
+button,
+a,
+select,
+input,
+textarea,
+label {
+  transition-timing-function: var(--ease-ios);
+}
+
+/* Press-in is near-instant while release keeps the element's soft base
+   duration — the asymmetry makes taps feel immediate without losing the
+   glide on the way back. */
+button:active,
+a:active {
+  transition-duration: 60ms;
+}
+
+/* Soft, always-rounded scrollbars (macOS overlay style) */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: rgb(0 0 0 / 0.14);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  transition: background-color 0.3s var(--ease-ios);
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(0 0 0 / 0.28);
+}
+
+/* Horizontal scroll areas (tab strips) scroll without showing a bar */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* ---------- "There is more to the right" ---------- */
+
+/* A table too wide for a phone scrolls sideways inside its own box, which is
+   correct — the page must never scroll sideways. What was missing is any sign
+   that it does: the Daily man-hours table simply stopped at the screen edge
+   mid-column, and a column cut in half reads as a broken page, not as
+   something to swipe.
+
+   This is the pure-CSS scroll shadow, so it needs no JavaScript and no width
+   measurement. Four background layers: two `local` ones, which scroll WITH the
+   content and therefore sit over the true start and end of it, and two
+   `scroll` ones pinned to the visible box. The local layer covers the shadow
+   exactly when you are at that edge, so a shadow shows on the side that still
+   has content and disappears when you reach it.
+
+   The cover layers have to match the ground the scroller sits on, or they show
+   as a smudge instead of hiding the shadow. `--card` is the default because
+   that is what these sit on; a tinted surface sets `--scroll-hint-bg` to its
+   own colour. */
+.scroll-x-hint {
+  background-image:
+    linear-gradient(to right, var(--scroll-hint-bg, var(--card)) 30%, transparent),
+    linear-gradient(to left, var(--scroll-hint-bg, var(--card)) 30%, transparent),
+    linear-gradient(to right, rgb(0 0 0 / 0.22), transparent 20px),
+    linear-gradient(to left, rgb(0 0 0 / 0.22), transparent 20px);
+  background-position: left center, right center, left center, right center;
+  background-repeat: no-repeat;
+  background-size: 34px 100%, 34px 100%, 20px 100%, 20px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+
+/* ---------- Section shells on a SHORT viewport ---------- */
+
+/* Weekly Progress and Document Control both pin their own chrome — week
+   picker, stepper, tab row — above a scroller of their own, so moving between
+   tabs never disturbs the furniture. That is right on a tall screen and
+   ruinous on a short one, because the chrome costs a fixed ~190px no matter
+   how little height there is to spend.
+
+   Measured, not guessed. An iPhone held sideways is 844x390: <main> came to
+   334px and the report was read through a 146px slot. A 740x360 Android was
+   worse — 116px. Four fifths of the screen was navigation.
+
+   Below 560px of viewport height the pin is released: the scroller stops being
+   one, the shell grows to its content, and the app shell's own <main> (already
+   `overflow-auto`) takes the scrolling back. The chrome scrolls away with the
+   page and the content gets the whole screen; scrolling back up returns it.
+
+   This keys off HEIGHT alone. No width breakpoint is involved, so a phone in
+   portrait, a tablet and every desktop window keep the pinned chrome exactly
+   as before — the rule only fires on a viewport too short to afford it. */
+@media (max-height: 560px) {
+  .section-shell {
+    height: auto;
+    min-height: 100%;
+  }
+  .section-shell > .section-scroll {
+    flex: none;
+    overflow: visible;
+  }
+}
+
+/* ---------- Entrance animations ---------- */
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes underline-in {
+  from {
+    transform: scaleX(0.4);
+    opacity: 0;
+  }
+  to {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.22s var(--ease-gentle) both;
+}
+
+/* Loading skeletons hold invisible for a beat before fading in: fast loads
+   never flash a skeleton at all, slow loads still show feedback promptly. */
+.animate-loading-reveal {
+  opacity: 0;
+  animation: fade-in 0.2s ease-out 0.15s forwards;
+}
+
+@keyframes fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+.animate-fade-out {
+  animation: fade-out 0.12s var(--ease-ios) both;
+}
+
+@keyframes scale-out {
+  to {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+.animate-scale-out {
+  animation: scale-out 0.12s var(--ease-ios) both;
+}
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 0.35s var(--ease-out-expo) both;
+}
+
+/* The activity sheet opening. A CSS keyframe on transform and opacity only, so
+   it runs on the compositor and keeps going while React is still mounting the
+   panel's contents; the framer-motion spring it replaces ran on the main thread
+   and stuttered exactly there (25 Sep 2026). 0.5s on `--ease-ios` is the iOS
+   sheet itself: most of the travel in the first third, then a long soft settle,
+   so it reads as opening rather than as appearing. It sits on a wrapper, never
+   on the dragged element, so a finger that grabs the sheet mid-open is followed
+   instead of fought. Phone rises from the bottom, desktop slides from the right. */
+@keyframes sheet-up {
+  from {
+    transform: translate3d(0, 100%, 0);
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes sheet-left {
+  from {
+    transform: translate3d(100%, 0, 0);
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-sheet-in {
+  animation: sheet-up 0.5s var(--ease-ios) both;
+}
+
+@media (min-width: 640px) {
+  .animate-sheet-in {
+    animation-name: sheet-left;
+  }
+}
+
+.animate-scrim-in {
+  animation: scrim-in 0.4s var(--ease-ios) both;
+}
+
+/* The way out is the way in, backwards in space and equal in time: the same
+   0.5s on the same curve, so closing is seen rather than being a cut (25 Sep
+   2026). A separate keyframe rather than `animation-direction: reverse` on the
+   old one: keeping the name would not restart the animation, and a finished
+   `both` fill flipped to reverse jumps straight to its end. */
+@keyframes sheet-down {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(0, 100%, 0);
+  }
+}
+
+@keyframes sheet-right {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(100%, 0, 0);
+  }
+}
+
+@keyframes scrim-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.animate-sheet-out {
+  animation: sheet-down 0.5s var(--ease-ios) both;
+}
+
+@media (min-width: 640px) {
+  .animate-sheet-out {
+    animation-name: sheet-right;
+  }
+}
+
+.animate-scrim-out {
+  animation: scrim-out 0.4s var(--ease-ios) both;
+}
+
+/* Every other pop-up opens like the activity sheet (15 Oct 2026,
+   components/ui/SoftSheet.tsx): on a phone the same slide up from below the
+   screen and back down, from `sm` a centred card rising and fading on the same
+   curve and time, because its place there is the middle of the page. */
+@keyframes card-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 32px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+@keyframes card-sink {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(0, 32px, 0);
+  }
+}
+.animate-sheet-rise {
+  animation: sheet-up 0.5s var(--ease-ios) both;
+}
+.animate-sheet-fall {
+  animation: sheet-down 0.5s var(--ease-ios) both;
+}
+@media (min-width: 640px) {
+  .animate-sheet-rise {
+    animation-name: card-rise;
+  }
+  .animate-sheet-fall {
+    animation-name: card-sink;
+  }
+}
+
+/* A Radix pop-up opening the way the app's own sheets do (3 Oct 2026). shadcn's
+   dialog gives 100ms of fade + zoom over a blurred page: on a phone that is one
+   frame after a pause, a pop rather than an opening, and the blur is recomputed
+   over the whole page every frame. These are the activity sheet's terms instead:
+   a plain dark scrim fading on `--ease-ios`, the card rising a few pixels as it
+   settles, transform and opacity only so it runs on the compositor. Keyed on the
+   data-state Radix writes, so its Presence waits for the exit to finish. Outside
+   any layer on purpose: it has to win over tw-animate's `animate-in` utilities.
+   The card's centring is the `translate` property, which this `transform` adds to
+   rather than replaces. */
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+@keyframes dialog-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0) scale(0.98);
+  }
+}
+.dialog-soft[data-state='open'] {
+  animation: dialog-in 0.42s var(--ease-ios) both;
+}
+.dialog-soft[data-state='closed'] {
+  animation: dialog-out 0.24s var(--ease-ios) both;
+}
+.scrim-soft[data-state='open'] {
+  animation: scrim-in 0.4s var(--ease-ios) both;
+}
+.scrim-soft[data-state='closed'] {
+  animation: scrim-out 0.24s var(--ease-ios) both;
+}
+
+@keyframes level-in-fwd {
+  from {
+    opacity: 0;
+    transform: translateX(32px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes level-in-back {
+  from {
+    opacity: 0;
+    transform: translateX(-32px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes save-out {
+  to {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+}
+
+.animate-save-out {
+  animation: save-out 0.24s var(--ease-ios) both;
+}
+
+/* Save bar entrance: rises with a touch of overshoot, no bounce on the text. */
+@keyframes save-bar-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-save-bar-in {
+  animation: save-bar-in 0.34s var(--ease-spring) both;
+}
+
+/* Pending badge: springs in, then breathes so the amber reads as "still waiting".
+   It owns box-shadow outright — never combine with a Tailwind `ring-*`. */
+@keyframes badge-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4) rotate(-14deg);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+@keyframes badge-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 4px rgb(245 158 11 / 0.16);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgb(245 158 11 / 0.06);
+  }
+}
+
+.animate-badge-pending {
+  animation:
+    badge-in 0.42s var(--ease-spring) both,
+    badge-breathe 2.6s var(--ease-ios) 0.45s infinite;
+}
+
+@keyframes label-in {
+  from {
+    opacity: 0;
+    transform: translateX(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-label-in {
+  animation: label-in 0.32s var(--ease-out-expo) 0.07s both;
+}
+
+@keyframes dropdown-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes dropdown-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.96);
+  }
+}
+
+.animate-dropdown-in {
+  animation: dropdown-in 0.16s var(--ease-out-expo) both;
+  transform-origin: top left;
+}
+
+.animate-dropdown-out {
+  animation: dropdown-out 0.12s var(--ease-ios) both;
+  transform-origin: top left;
+}
+
+.animate-level-fwd {
+  animation: level-in-fwd 0.35s var(--ease-out-expo) both;
+}
+
+.animate-level-back {
+  animation: level-in-back 0.35s var(--ease-out-expo) both;
+}
+
+/* 0.34s over 10px, raised from 0.26s over 8px alongside `.animate-enter`.
+   This class carries every list cascade in Document Control — the group
+   buttons, the document rows, the log's event cards — and at 0.26s a row was
+   in place before the eye reached it, so a cascade of twenty read as one
+   flicker instead of as a sequence.
+
+   IT NO LONGER MIRRORS `MOTION.duration`, and that is deliberate: the two were
+   only ever the same number by coincidence. `MOTION.duration` is how long a
+   reply to a tap takes and must stay short; this is how long something takes to
+   ARRIVE, which is a different job with a different right answer. */
+.animate-fade-in-up {
+  animation: fade-in-up 0.34s var(--ease-out-expo) both;
+}
+
+/* ---------- The section entrance ---------- */
+/* One step up from `.animate-fade-in-up`, and the difference is what the thing
+   IS. `.animate-fade-in-up` is for something incidental appearing — a tick
+   inside a button, an error banner, a row. This is for a SECTION arriving: a
+   card, a panel, a block a page is built out of. Bigger objects need to travel
+   further and take longer or they read as twitchy, which is the whole reason
+   `.animate-rise-in` (18px / 0.7s) exists above for the single hero surface.
+   The three now form a scale — 8px/0.26s, 16px/0.42s, 18px/0.7s — instead of
+   every page picking one at random.
+
+   Mirrors `MOTION.enter` in lib/design.ts. Change one, change the other.
+
+   transform + opacity ONLY. No filter, no blur, no width: those relayout or
+   re-rasterise every frame, and this class is about to be on ten elements per
+   page on a phone. */
+@keyframes enter-up {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 0.55s over 20px, raised from 0.42s over 16px on 30 August 2026 because the
+   app was asked twice to feel softer.
+
+   The lever is distance and time, not the curve: `--ease-out-expo` is already
+   the softest landing in the file, and swapping it changes nothing anyone can
+   see. What made these read as a POP rather than a GLIDE was that they were
+   over almost before the eye caught them. A longer travel at a longer duration
+   is the same motion, given room to be seen.
+
+   The old value's note argued 0.42 was "under the half-second where a screen
+   someone opens forty times a week starts feeling slow". That is still the
+   right thing to worry about, so this stops at 0.55 rather than going where
+   "luxurious" would pull it — and it applies only to SECTIONS ARRIVING.
+   Interaction stays at MOTION.duration, because a reply must be instant even
+   when an introduction should not be. */
+.animate-enter {
+  animation: enter-up 0.55s var(--ease-out-expo) both;
+}
+
+/* ---------- Stagger ---------- */
+/* The delays, as classes, because they were being written as inline
+   `style={{ animationDelay: '240ms' }}` on every section of every page — six
+   of them in DailyForm alone — which put the timing of the app's motion in
+   thirty different files with no way to see it as one thing.
+
+   Both properties are set on purpose: `animation-delay` staggers the load
+   entrance (`.animate-enter`), `transition-delay` staggers a scroll reveal
+   (`.scroll-reveal`, which transitions rather than animates). An element only
+   ever uses one of them; the other costs nothing.
+
+   It stops at 8. The whole cascade is then 0.48s of delay plus a 0.42s
+   animation — already at the edge of what a page can spend before it stops
+   feeling responsive. A section further down the page than eight is below the
+   fold, and below the fold belongs to `.scroll-reveal`, not to a delay. */
+.stagger-1 {
+  animation-delay: 0.06s;
+  transition-delay: 0.06s;
+}
+.stagger-2 {
+  animation-delay: 0.12s;
+  transition-delay: 0.12s;
+}
+.stagger-3 {
+  animation-delay: 0.18s;
+  transition-delay: 0.18s;
+}
+.stagger-4 {
+  animation-delay: 0.24s;
+  transition-delay: 0.24s;
+}
+.stagger-5 {
+  animation-delay: 0.3s;
+  transition-delay: 0.3s;
+}
+.stagger-6 {
+  animation-delay: 0.36s;
+  transition-delay: 0.36s;
+}
+.stagger-7 {
+  animation-delay: 0.42s;
+  transition-delay: 0.42s;
+}
+.stagger-8 {
+  animation-delay: 0.48s;
+  transition-delay: 0.48s;
+}
+
+/* ---------- Scroll reveal ---------- */
+/* A section below the fold arrives as it is scrolled to, rather than having
+   already happened somewhere the user never looked.
+
+   NOTHING HERE IS IN THE SERVER HTML, and that is the whole safety argument.
+   `.scroll-reveal` is added by `components/motion/ScrollReveal.tsx` at runtime
+   and only to an element the observer has confirmed is OFF SCREEN. So a
+   phone that never receives the bundle renders every section visible, and a
+   user who scrolls faster than hydration never watches content vanish from
+   under their finger. Shipping the hidden state in the markup instead — the
+   obvious version of this feature — is precisely the bug
+   `components/motion/Reveal.tsx` exists to document.
+
+   It is a TRANSITION, not an animation, so the observer's job is one class
+   toggle and there is no second keyframe set to keep in step with
+   `.animate-enter`. The values are deliberately identical to `enter-up`: an
+   element should not be able to tell you whether it arrived by load or by
+   scroll. transform + opacity only, for the same reason as above — this one
+   runs while the user's finger is on the glass, which is the least forgiving
+   moment in the app. */
+.scroll-reveal {
+  opacity: 0;
+  transform: translateY(16px) scale(0.985);
+  transition:
+    opacity 0.42s var(--ease-out-expo),
+    transform 0.42s var(--ease-out-expo);
+}
+
+.scroll-reveal.is-in {
+  opacity: 1;
+  transform: none;
+}
+
+/* A hero-scale surface arriving — the one card a page is about, not a row in a
+   list. The same argument `.animate-level-fwd` already makes for a whole screen
+   sliding sideways: a bigger object needs longer and further, and matching it
+   to the row cards is what made this one feel like a row card. Reserve it for
+   the single dominant surface on a page; everything else keeps
+   `.animate-fade-in-up`. */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-rise-in {
+  animation: rise-in 0.7s var(--ease-out-expo) both;
+}
+
+.animate-scale-in {
+  animation: scale-in 0.22s var(--ease-out-expo) both;
+}
+
+/* Popovers grow out of the thing they belong to, so they set their own
+   transform-origin (the caret) and lean on the spring curve for the small
+   overshoot that makes them feel physical rather than faded-in. */
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-popover-in {
+  animation: popover-in 0.24s var(--ease-spring) both;
+}
+
+.animate-underline {
+  animation: underline-in 0.3s var(--ease-out-expo) both;
+  transform-origin: center;
+}
+
+@keyframes pop-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+  55% {
+    opacity: 1;
+    transform: scale(1.18);
+  }
+  75% {
+    transform: scale(0.94);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes glow-once {
+  0% {
+    box-shadow: 0 0 0 0 rgb(16 185 129 / 0.5);
+  }
+  100% {
+    box-shadow: 0 0 0 16px rgb(16 185 129 / 0);
+  }
+}
+
+/* The sidebar project card, when the current week changes under it: the
+   Current badge's own green glow, once, so the two read as one change. */
+.animate-card-glow {
+  animation: glow-once 0.75s ease-out both;
+}
+
+.animate-pop-in {
+  animation:
+    pop-in 0.42s var(--ease-out-expo) both,
+    glow-once 0.75s ease-out 0.15s both;
+}
+
+@keyframes check-draw {
+  from {
+    stroke-dashoffset: 24;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.animate-check-draw {
+  stroke-dasharray: 24;
+  animation: check-draw 0.3s var(--ease-out-expo) 0.08s both;
+}
+
+@keyframes success-bump {
+  0% {
+    transform: scale(1);
+  }
+  35% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* Saved, on a WIDE button (one that fills its row: the Export pop-up, the daily
+   report's foot). The bump's 1.08 is a few pixels on an icon button and 28 px on a
+   full-width one, which pushed it into the card's edge and read as a glitch
+   (3 Oct 2026). A wide button says it with its colour, the drawn tick and a halo
+   kept inside the padding around it. */
+@keyframes glow-soft {
+  0% {
+    box-shadow: 0 0 0 0 rgb(16 185 129 / 0.35);
+  }
+  100% {
+    box-shadow: 0 0 0 6px rgb(16 185 129 / 0);
+  }
+}
+
+.animate-success-soft {
+  animation: glow-soft 0.8s var(--ease-ios) both;
+}
+
+.animate-success-bump {
+  animation:
+    success-bump 0.5s var(--ease-out-expo) both,
+    glow-once 0.9s ease-out both;
+}
+
+/* A meter segment filling its own slot.
+   IT ANIMATES transform, NOT width, and the difference is the whole feature.
+   `from { width: 0 }` made the browser re-lay-out the flex row on every frame
+   of every segment: measured on Detail Progress at 4x CPU, the four segments
+   alone accounted for 72 Layout passes / 276ms and 144ms of Layerize across
+   the entrance, and dragged the hero gauge's repaints along with them. scaleX
+   runs on the compositor, and the slot keeps its final width from the first
+   frame, so the meter no longer shoves its own segments rightward as it
+   fills. */
+@keyframes bar-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+/* The hero gauge's arc, drawn from nothing to the value ALREADY IN THE HTML.
+   `--arc-c` is the circle's circumference, handed in by the component; the
+   resting state is the real dasharray, so a browser that never runs the
+   animation still shows the right number. This replaced a `drawn` useState +
+   useEffect that left `stroke-dasharray="0 361.28"` in the server markup —
+   the ring sat empty until hydration finished (6.6s at 4x CPU) and then
+   lurched. Same class of bug as the one Reveal.tsx exists to prevent. */
+@keyframes arc-draw {
+  from {
+    stroke-dasharray: 0 var(--arc-c);
+  }
+}
+
+/* SavePdfButton: the arrow dips into the tray on a slow loop, so the button
+   reads as "downloads a file" at a glance */
+@keyframes pdf-arrow-dip {
+  0%,
+  70%,
+  100% {
+    transform: translateY(0);
+  }
+  82% {
+    transform: translateY(1.5px);
+  }
+}
+
+.animate-pdf-arrow {
+  animation: pdf-arrow-dip 2.6s var(--ease-ios) infinite;
+}
+
+/* The two long ones. They can afford their length now: the segment rides the
+   compositor and the arc is already correct in the markup, so time here buys
+   grace instead of jank. Cutting them to 0.45/0.55 while fixing the jank was
+   a separate mistake — nothing about the fix required a shorter animation, and
+   the hero stopped feeling like the hero. */
+.animate-bar-grow {
+  /* Grows from its own left edge, so a row of segments reads as one sweep. */
+  transform-origin: left center;
+  animation: bar-grow 1s var(--ease-draw) both;
+}
+
+.animate-arc-draw {
+  animation: arc-draw 1.3s var(--ease-draw) both;
+}
+
+/* The curve's endpoint dot. Its own keyframe rather than `.animate-scale-in`,
+   which travels 0.97 → 1 and on a 10px dot is no movement at all.
+
+   IT CARRIES THE CENTRING TRANSLATE ITSELF, and the element keeps its
+   `-translate-x-1/2 -translate-y-1/2` classes as well. An animation on
+   `transform` overrides those classes while it runs, so the keyframe has to
+   repeat them or the dot would jump half its own width on the way in; and the
+   classes have to stay for the reduced-motion case, where the animation never
+   runs and the transform must still come from somewhere. */
+@keyframes dot-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.2);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+.animate-dot-in {
+  animation: dot-in 0.55s var(--ease-out-expo) both;
+}
+
+/* Document Control's ring, swept round from nothing to the value ALREADY IN
+   THE MARKUP. Sibling of `arc-draw` above, and separate from it because the two
+   arcs are built differently: the hero gauge animates `stroke-dasharray`, while
+   this ring sets a full-circumference dasharray and moves the OFFSET. `--ring-c`
+   is the circumference, handed in by the component, so one class serves both
+   radii.
+
+   The resting state is the real offset, so a browser that never runs the
+   animation still shows the right figure — the same rule the gauge follows. */
+@keyframes ring-draw {
+  from {
+    stroke-dashoffset: var(--ring-c);
+  }
+}
+
+.animate-ring-draw {
+  animation: ring-draw 1.3s var(--ease-draw) both;
+}
+
+/* The dashboard curve, revealed by a CLIP WIPE rather than a dash offset.
+   AGENTS.md prescribes exactly this, and that chart is why: its viewBox is
+   stretched (`preserveAspectRatio="none"`), every path carries
+   `vector-effect: non-scaling-stroke`, and the plan line ALREADY has its own
+   `stroke-dasharray="7 6"`. A dash-offset reveal would have to overwrite that
+   pattern to work, so the plan line would stop being dashed for the length of
+   the animation — and on a stretched viewBox the path's length in user units
+   does not match what you see anyway, so the offset would be wrong as well.
+
+   A clip rect has none of those problems. It sweeps left to right over the
+   whole group, the dashes stay dashes, and it is one composited element rather
+   than one per path.
+
+   `transform-box: fill-box` is what makes `transform-origin` mean the rect's
+   own left edge instead of the SVG's origin. */
+@keyframes curve-wipe {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+.animate-curve-wipe {
+  transform-box: fill-box;
+  transform-origin: left center;
+  animation: curve-wipe 1.1s var(--ease-draw) both;
+}
+
+.animate-shimmer {
+  background: linear-gradient(90deg, #f3f4f6 25%, #e5e7eb 37%, #f3f4f6 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.1s ease-in-out infinite;
+}
+
+/* ---------- Route view transitions ---------- */
+/* The old page slips away fast — nobody wants to watch what they just left.
+   The incoming page does NOT slide, and that is the deliberate part: it only
+   fades up its opacity while the sections INSIDE it play `.animate-enter` in
+   sequence. So what the eye follows on a route change is the cards cascading
+   in, not one grey slab moving, and the load entrance and the route entrance
+   are the same piece of motion instead of two fighting each other.
+
+   It is also the cheap choice, which matters more here than it looks. A view
+   transition rasterises the captured element; on Detail Progress that element
+   is a page of hundreds of rows, and putting a 0.36s transform on an image
+   that size is exactly how this goes janky on a phone. Opacity on a snapshot
+   composites; a transform on one that big does not, reliably.
+
+   Timings mirror `MOTION.routeOut` / `MOTION.routeIn` in lib/design.ts. */
+
+::view-transition-old(.page-exit) {
+  animation: 120ms var(--ease-ios) both vt-out;
+}
+
+::view-transition-new(.page-enter) {
+  animation: 200ms var(--ease-out-expo) both vt-in;
+}
+
+/* Both layers are painted at once mid-transition; without this the two
+   opacities sum and the crossfade flashes brighter than either page. */
+::view-transition-old(.page-exit),
+::view-transition-new(.page-enter) {
+  mix-blend-mode: normal;
+}
+
+/* An activity panel opened by the arrival itself (Check → `?item=`) lives in a
+   portal on <body>, outside the page's named layer, so the page's crossfade
+   was drawn OVER it: map text through the sheet for the whole fade. Its own
+   layer paints above the page, and plays only its own slide (`sheet-in`).
+   Every overlay (useOverlayLayer) does the same: painted above both pages,
+   leaving with the old one, and one that the arrival opens plays its own
+   entrance. Naming it is not enough: a layer only the OLD page had is stacked
+   below the new page's, so a sheet a press navigated away from showed through
+   the arriving page while it faded in (Set in plan → Gantt, Nov 2026). */
+::view-transition-group(.overlay) {
+  z-index: 1;
+}
+::view-transition-old(.overlay) {
+  animation: 120ms var(--ease-ios) both vt-out;
+}
+::view-transition-new(.overlay) {
+  animation: none;
+}
+/* A sheet leaves the way it closes, SOLID: faded, its text sat over both
+   pages' at once. Its scrim is a plain `.overlay` and fades. */
+::view-transition-old(.side),
+::view-transition-old(.card) {
+  animation: 0.4s var(--ease-ios) both sheet-down;
+}
+::view-transition-old(.drawer) {
+  animation: 0.4s var(--ease-ios) both sheet-right;
+}
+@media (min-width: 640px) {
+  ::view-transition-old(.side) {
+    animation-name: sheet-right;
+  }
+  ::view-transition-old(.card) {
+    animation-name: card-sink;
+  }
+}
+
+@keyframes vt-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes vt-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ---------- Print ---------- */
+/* The app shell uses fixed-height scroll containers; when printing the
+   current subpage those would clip everything past page one. Let the
+   document flow to its natural height so every page prints. */
+@media print {
+  html,
+  body {
+    height: auto !important;
+    overflow: visible !important;
+  }
+  /* Paper has no depth. Shadows and blurs are screen affordances that a printer
+     renders as grey smudges — and print-color-adjust: exact (below) makes the
+     browser print them faithfully instead of quietly dropping them. The closed
+     mobile drawer, parked off-screen with a transform and portalled to <body>
+     where the toolbar's print:hidden couldn't reach it, smeared its shadow-2xl
+     across the top-left corner of every printed page. */
+  *,
+  *::before,
+  *::after {
+    box-shadow: none !important;
+    text-shadow: none !important;
+    filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+  /* Margin ZERO, deliberately — this is what keeps the browser's own
+     header/footer band (date + title on top, URL + "1/9" on the bottom) off
+     the printout. Chrome and Android draw that band INTO the page margin; with
+     no margin there is no room and it vanishes. Giving @page a real margin
+     (14-17mm, July 2026) brought the band back on every desktop/Android
+     printout. No CSS can disable the band directly — zero margin is the only
+     page-side lever, so the visual margin lives INSIDE the sheet as padding
+     (see .print-sheet-a4 below). iOS Safari is the exception: it reserves its
+     own strip and prints its band regardless; nothing page-side can change
+     that. */
+  @page {
+    size: A4;
+    margin: 0;
+  }
+}
+
+/* ---------- A4 report sheets ---------- */
+/* THE ONLY place a printable page may declare its geometry. Report
+   components render content; this class owns width, height, padding and page
+   breaks. Every rule below is a real-device regression, so keep the
+   invariants when editing:
+   1. ON PAPER A SHEET NEVER ASSERTS A SIZE. width/min-height in mm assume the
+      printable area equals A4 — it doesn't. iOS Safari keeps ~12mm top and
+      bottom for its own header/footer, and printers have hard margins, so a
+      294mm-tall sheet overflowed onto a second, blank page: 9 sheets printed
+      as 18 pages, blank-content-blank-content (iPhone, July 2026). On paper
+      the sheet is a plain block: full width of the page box, exactly as tall
+      as its content. The A4 look is a SCREEN-ONLY affordance.
+   2. No break-inside: avoid on the sheet. A page-sized unbreakable box that
+      doesn't fit gets shunted to a fresh page, blanking the one before it.
+      Atomicity belongs on rows / images / charts, not on the page itself.
+   3. No page-break-after on the LAST sheet — that always emitted a trailing
+      blank page.
+   4. Paper must never paginate through a flex container (WebKit drops the
+      fragments): sheets and their wrappers are display: block on paper.
+   Keep each sheet's CONTENT under ~240mm tall (≈262mm with the print padding).
+   Beyond that it splits across two pages on devices with a smaller printable
+   area — pages with content, not blanks, but still ugly. */
+.print-sheet-a4 {
+  width: 210mm;
+  min-height: 297mm;
+  /* sides match the print padding, so the on-screen preview and the paper have
+     the same content width (180mm) and nothing reflows between them; the
+     roomier top/bottom is preview-only */
+  padding: 14mm 15mm 17mm;
+  margin: 0 auto;
+  box-sizing: border-box;
+  background: #fff;
+  /* paper-on-a-desk look in the on-screen preview */
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
+
+  /* --- one look on every device --- */
+  /* Inter, the app's embedded webfont — NOT a system stack. Windows, macOS and
+     Android each resolve a system stack to a different face, which changes line
+     breaks, column widths and therefore where the report ends up splitting. */
+  font-family: var(--font-sans);
+  color: var(--rpt-ink);
+  /* figures line up in columns instead of dancing */
+  font-variant-numeric: tabular-nums;
+  -webkit-text-size-adjust: 100%;
+  /* Without this, browsers strip "background graphics" when printing and the
+     header bands and zebra rows come out plain white on some devices and
+     shaded on others — the single biggest source of "it looks different on my
+     phone". Chrome, Safari and Firefox all honour it. */
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+@media print {
+  .print-sheet-a4 {
+    display: block;
+    width: auto;
+    max-width: 100%;
+    min-height: 0;
+    height: auto;
+    /* @page margin is 0 (the only thing that suppresses the browser's own
+       header/footer band), so the visible margin is the sheet's padding.
+       Sides stay 15mm — the same content width (180mm) as the on-screen
+       preview, so nothing reflows between screen and paper. Top/bottom are
+       SLIMMER than the preview on purpose: total sheet height must stay
+       under ~262mm, because iOS reserves ~12mm strips top and bottom out of
+       the 297mm page no matter what @page says, and a sheet taller than
+       what's left spills a blank page after every real one. */
+    padding: 10mm 15mm 12mm;
+    margin: 0;
+    box-shadow: none;
+    overflow: visible;
+    break-inside: auto;
+    page-break-inside: auto;
+    break-after: page;
+    page-break-after: always;
+  }
+  /* no forced break after the final sheet — kills the trailing blank page */
+  .print-sheet-a4:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+  /* atomicity lives on the small things, never on the sheet */
+  .print-sheet-a4 tr,
+  .print-sheet-a4 img,
+  .print-sheet-a4 [data-print-chart] {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  /* if a table ever does outgrow one page, repeat its header instead of
+     orphaning the rows */
+  .print-sheet-a4 thead {
+    display: table-header-group;
+  }
+}
+
+/* ---------- A4 landscape sheets: the Gantt PDF ---------- */
+/* The same sheet turned sideways (8 Oct 2026). The landscape @page is NOT here:
+   a named page (`page: gantt` + `@page gantt`) silently dropped this whole
+   block from Turbopack's CSS output, so app/print/projects/[id]/page.tsx, which
+   prints nothing but these sheets, carries its own @page. lib/gantt-print.ts
+   cuts the rows to fit 273mm x 191mm, the box left inside this padding, so
+   change the two together. */
+.print-sheet-a4.print-sheet-landscape {
+  /* every rule on the sheet that is not the black one, and the row numbers */
+  --gantt-line: #2f2f3b;
+  width: 297mm;
+  min-height: 210mm;
+  padding: 10mm 12mm 9mm;
+}
+@media print {
+  .print-sheet-a4.print-sheet-landscape {
+    padding: 10mm 12mm 9mm;
+  }
+}
+.gantt-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 58px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--rpt-ink);
+}
+.gantt-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 22px;
+}
+.gantt-sub {
+  margin: 3px 0 0;
+  font-size: 11px;
+  color: var(--rpt-muted);
+}
+.gantt-parties {
+  flex-shrink: 0;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: right;
+  color: var(--rpt-muted);
+}
+.gantt-parties b {
+  font-weight: 600;
+  color: var(--rpt-ink);
+}
+.gantt-cont {
+  height: 20px;
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 20px;
+  color: var(--rpt-muted);
+}
+/* the frame stands clear of the title rule; under "Continued from" that line
+   already parts them. Paid from the `continued` band every sheet budgets. */
+.gantt-grid {
+  position: relative;
+  margin-top: 8px;
+}
+.gantt-cont + .gantt-grid {
+  margin-top: 0;
+}
+.gantt-chart {
+  position: absolute;
+  top: 0;
+  overflow: visible;
+}
+.gantt-colhead,
+.gantt-row {
+  display: grid;
+  box-sizing: border-box;
+  font-size: 11px;
+}
+.gantt-colhead {
+  align-items: center;
+  border-bottom: 1px solid var(--rpt-ink);
+  font-weight: 500;
+  color: var(--rpt-muted);
+}
+.gantt-row {
+  align-items: center;
+  line-height: 13px;
+  border-bottom: 0.5px solid var(--gantt-line);
+}
+/* with a chart beside it, its SVG draws these rules, thinner than a border can be */
+.gantt-table.is-charted .gantt-row,
+.gantt-table.is-charted .gantt-colhead {
+  border-bottom: 0;
+}
+.gantt-colhead > span,
+.gantt-row > span {
+  padding: 0 6px;
+  white-space: nowrap;
+}
+.gantt-row > .gantt-name {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.gantt-code {
+  color: var(--gantt-line);
+}
+.gantt-row.is-heading {
+  font-weight: 600;
+}
+.gantt-row.is-top {
+  background: #c6dcff;
+}
+/* columns from legendColumns in lib/gantt-print.ts, which budgets this gap and
+   the side padding. The key is the table's last band: the chart's SVG draws its
+   frame, to the height GanttPrint sets here. */
+.gantt-key {
+  display: grid;
+  justify-content: space-between;
+  gap: 6px 20px;
+  /* the sides are the table's cell padding (SHEET.cellPad), so the key starts
+     and ends where the table's text does */
+  padding: 7px 6px;
+  font-size: 10.5px;
+  line-height: 12px;
+  color: #334155;
+}
+.gantt-key > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.gantt-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 7px;
+  font-size: 10.5px;
+  color: var(--rpt-muted);
+}
+.gantt-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.gantt-brand img {
+  width: auto;
+  height: 14px;
+}
+.gantt-brand b {
+  font-weight: 600;
+  color: var(--rpt-ink);
+}
+
+/* ---------- Report design system ---------- */
+/* Every printed report is built from these pieces and nothing else. A report
+   component picks classes; it does not invent borders, greys or font sizes —
+   that is how the five reports drifted into five different looks.
+   Sizes are in pt and mm (print units), so a millimetre on screen is the same
+   millimetre on paper. */
+:root {
+  --rpt-ink: #0f172a;
+  --rpt-muted: #64748b;
+  --rpt-rule: #cbd5e1; /* hairline between cells */
+  --rpt-rule-strong: #475569; /* table outline, header underline */
+  --rpt-head: #e8edf4; /* header band */
+  --rpt-group: #eef2f7; /* summary / parent rows */
+  --rpt-total: #dbe3ee; /* grand total row */
+  --rpt-zebra: #f8fafc; /* every other body row */
+  --rpt-accent: #1e3a8a;
+}
+
+/* --- sheet header: logos, hairline, title block --- */
+.rpt-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10mm;
+}
+.rpt-brand img {
+  height: 9.5mm;
+  width: auto;
+  max-width: 45mm;
+  object-fit: contain;
+}
+.rpt-rule {
+  border: 0;
+  border-top: 0.4mm solid var(--rpt-accent);
+  margin: 2.5mm 0 0;
+}
+.rpt-titleblock {
+  text-align: center;
+  margin: 3mm 0 4mm;
+}
+.rpt-title {
+  font-size: 11pt;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--rpt-accent);
+  line-height: 1.25;
+}
+.rpt-project {
+  margin-top: 1.2mm;
+  font-size: 7.5pt;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.rpt-period {
+  display: inline-block;
+  margin-top: 1.5mm;
+  padding: 0.6mm 2.6mm;
+  border: 0.2mm solid var(--rpt-rule);
+  border-radius: 999px;
+  background: var(--rpt-zebra);
+  font-size: 7pt;
+  color: var(--rpt-muted);
+}
+
+/* --- sheet footer --- */
+.rpt-footer {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6mm;
+  margin-top: 4mm;
+  padding-top: 1.5mm;
+  border-top: 0.2mm solid var(--rpt-rule);
+  font-size: 7pt;
+  color: var(--rpt-muted);
+}
+
+/* --- tables --- */
+.rpt-table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 0.35mm solid var(--rpt-rule-strong);
+  font-size: 8pt;
+  line-height: 1.3;
+}
+.rpt-table th,
+.rpt-table td {
+  border: 0.15mm solid var(--rpt-rule);
+  padding: 1.4mm 1.6mm;
+  vertical-align: middle;
+}
+.rpt-table thead th {
+  background: var(--rpt-head);
+  color: var(--rpt-ink);
+  font-weight: 700;
+  text-align: center;
+  border-color: #a9b6c6;
+}
+.rpt-table thead tr:last-child th {
+  border-bottom: 0.35mm solid var(--rpt-rule-strong);
+}
+.rpt-table tbody tr:nth-child(even) td {
+  background: var(--rpt-zebra);
+}
+.rpt-num {
+  text-align: center;
+  white-space: nowrap;
+}
+/* after the zebra rule, so a highlighted row always wins */
+.rpt-table tr.rpt-group td {
+  background: var(--rpt-group);
+  font-weight: 700;
+}
+.rpt-table tr.rpt-total td {
+  background: var(--rpt-total);
+  font-weight: 800;
+  border-top: 0.35mm solid var(--rpt-rule-strong);
+}
+/* the daily sheet stacks six tables and six photos across two pages */
+.rpt-table--compact {
+  font-size: 6.8pt;
+  line-height: 1.25;
+}
+.rpt-table--compact th,
+.rpt-table--compact td {
+  padding: 0.65mm 1mm;
+}
+/* the detail sheet packs 32 WBS rows onto a page */
+.rpt-table--dense {
+  font-size: 6.6pt;
+  line-height: 1.25;
+}
+.rpt-table--dense th,
+.rpt-table--dense td {
+  padding: 0.8mm 1.1mm;
+}
+.rpt-table--micro {
+  font-size: 5.6pt;
+  line-height: 1.2;
+}
+.rpt-table--micro th,
+.rpt-table--micro td {
+  padding: 0.6mm 0.4mm;
+}
+
+/* --- framed block (chart, photo, signature) --- */
+.rpt-card {
+  border: 0.25mm solid var(--rpt-rule-strong);
+  background: #fff;
+}
+.rpt-caption {
+  margin-top: 0.8mm;
+  text-align: center;
+  font-size: 6pt;
+  color: var(--rpt-muted);
+}
+.rpt-photo {
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border: 0.25mm solid var(--rpt-rule-strong);
+  background: var(--rpt-zebra);
+}
+/* the daily sheet fits six photos AND four tables on one page — 16:9 keeps it
+   inside the height budget where 4:3 would not */
+.rpt-photo--wide {
+  aspect-ratio: 16 / 9;
+}
+.rpt-photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.rpt-photo-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 7pt;
+  color: #b6c0cd;
+}
+.rpt-sign {
+  text-align: center;
+  font-size: 8pt;
+}
+.rpt-sign-company {
+  font-weight: 700;
+}
+.rpt-sign-line {
+  margin-top: 22mm;
+  padding-top: 1.5mm;
+  border-top: 0.3mm solid var(--rpt-ink);
+  font-weight: 600;
+}
+.rpt-sign-role {
+  margin-top: 0.5mm;
+  font-size: 7pt;
+  color: var(--rpt-muted);
+}
+.rpt-section {
+  margin: 3mm 0 1.2mm;
+  font-size: 8pt;
+  font-weight: 700;
+  color: var(--rpt-accent);
+}
+.rpt-section:first-of-type {
+  margin-top: 0;
+}
+
+/* ---------- Print preview scaler ---------- */
+/* PrintSheet scales the fixed-width A4 sheets down to fit phone/tablet
+   screens via an inline transform. Printing must always happen at natural
+   size: !important stylesheet rules are the one thing that beats inline
+   styles, so these undo the transform on paper. */
+.pv-scaler {
+  width: max-content;
+  transform-origin: top left;
+}
+@media print {
+  .pv-scale-box {
+    width: auto !important;
+    height: auto !important;
+    margin: 0 !important;
+  }
+  .pv-scaler {
+    width: auto !important;
+    transform: none !important;
+  }
+}
+
+/* ---------- Reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    transition-duration: 0.01ms !important;
+  }
+  ::view-transition-old(*),
+  ::view-transition-new(*),
+  ::view-transition-group(*) {
+    animation-duration: 0s !important;
+    animation-delay: 0s !important;
+  }
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  /* Dark inverts the direction of the hover: on a dark ground the pressed state
+     has to get BRIGHTER, not deeper, or the button sinks into the card.
+     Unvalidated — this app is light by decision; whoever turns dark on measures
+     these first. */
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --primary-hover: #3b82f6;
+  --primary-soft: #172554;
+
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --track: oklch(0.32 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  /* Same hues at the same meanings, one step lighter so they still carry on a
+     dark ground. */
+  --chart-1: #60a5fa;
+  --chart-2: #f87171;
+  --chart-3: #34d399;
+  --chart-4: #fbbf24;
+  --chart-5: #64748b;
+  /* Lighter faces of the same verdicts so they carry on a dark ground. */
+  --ok: #34d399;
+  --ok-soft: color-mix(in oklab, #34d399 18%, transparent);
+  --bad: #f87171;
+  --bad-soft: color-mix(in oklab, #f87171 18%, transparent);
+  --warn: #fbbf24;
+  --warn-soft: color-mix(in oklab, #fbbf24 18%, transparent);
+  /* Indigo-700 on a dark card is unreadable, so the meta pair lifts the way
+     the verdicts above it do: a lighter face and a washed ground. */
+  --meta: #a5b4fc;
+  --meta-strong: #e0e7ff;
+  --meta-soft: color-mix(in oklab, #818cf8 18%, transparent);
+  --check: #c4b5fd;
+  --check-soft: color-mix(in oklab, #a78bfa 18%, transparent);
+  /* Free to be the bright yellow here: on the dark card this is 9.5:1, where
+     the same hue on white was 1.5:1. */
+  --deviation: #facc15;
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+/* shadcn's overlays animate through tw-animate-css, which ships its own easing.
+   Left alone, a Radix dialog opens on a different curve than every other
+   control in the app (see the --ease-* system above) and reads as a bolted-on
+   component. Pinning the enter/exit utilities to the iOS curve keeps one
+   motion language. */
+@layer utilities {
+  .animate-in,
+  .animate-out {
+    animation-timing-function: var(--ease-ios);
+  }
+
+  /* THE ACTION FACE. Colour, lift and feedback only — a button keeps its own
+     size, radius and layout classes, so the whole app's primary action can be
+     re-tuned here instead of in nineteen files.
+
+     Two deliberate omissions. The shadow is tinted with the button's OWN blue
+     rather than black: a neutral drop shadow under a saturated colour reads as
+     grime, a tinted one reads as lift. And there is no `transform` here on
+     purpose — several of these buttons are framer-motion `m.button`s whose
+     press scale arrives as an inline style, and a CSS :active transform would
+     be overridden on some buttons and not others. */
+  .btn-primary {
+    background-color: var(--primary);
+    color: var(--primary-foreground);
+    box-shadow:
+      0 1px 2px oklch(0 0 0 / 0.08),
+      0 6px 16px -8px color-mix(in oklab, var(--primary) 60%, transparent);
+    transition:
+      background-color 0.3s var(--ease-ios),
+      box-shadow 0.3s var(--ease-ios);
+  }
+
+  /* hover: hover keeps the deepened face off touch screens, where :hover sticks
+     after a tap and the button stays looking pressed. */
+  @media (hover: hover) {
+    .btn-primary:hover:not(:disabled):not([aria-disabled='true']) {
+      background-color: var(--primary-hover);
+      box-shadow:
+        0 1px 2px oklch(0 0 0 / 0.1),
+        0 10px 24px -10px color-mix(in oklab, var(--primary) 70%, transparent);
+    }
+  }
+
+  .btn-primary:disabled,
+  .btn-primary[aria-disabled='true'] {
+    opacity: 0.5;
+    box-shadow: none;
+  }
+
+  /* Every Cancel in the app (9 Oct 2026). Grey text on a white card read as
+     no button at all; a soft filled face with a hairline is plainly pressable
+     and still quieter than the action beside it. */
+  .btn-cancel {
+    background-color: color-mix(in oklab, var(--foreground) 6%, var(--card));
+    color: var(--foreground);
+    font-weight: 500;
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--foreground) 10%, transparent);
+    transition: background-color 0.3s var(--ease-ios);
+  }
+
+  @media (hover: hover) {
+    .btn-cancel:hover:not(:disabled) {
+      background-color: color-mix(in oklab, var(--foreground) 11%, var(--card));
+    }
+  }
+
+  .btn-cancel:disabled {
+    opacity: 0.5;
+  }
+}
+
+
+/* The setup wizard's plan curve draws itself in. The line has a known length,
+   so revealing it costs a dash offset rather than an animation library — the
+   one persuasive animation in the app at zero bundle cost. */
+@keyframes curve-draw {
+  from {
+    stroke-dashoffset: 1400;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes curve-fill {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ---------- Sign in ---------- */
+
+/* The screens without the app's chrome (sign in, checkout) mark <html> with
+   `data-bare` (BARE_SCRIPT before the first paint, `useBareScreen` after), so
+   the root layout stays the only layout and reads nothing new. NEVER a
+   `body:has(...)` here: it was one until 12 Nov 2026, and every DOM insert and
+   inline style change anywhere re-styled the whole page, ~2,600 elements per
+   planner scroll step. */
+html[data-bare] [data-app-chrome] {
+  display: none;
+}
+
+/* Payment's stepper band: the login's three brand colours, washed almost to
+   white so the form below stays the cleanest thing on the page. */
+.checkout-band {
+  background: linear-gradient(
+    100deg,
+    color-mix(in oklab, #c5dbfe 60%, white) 0%,
+    color-mix(in oklab, #00d0d4 12%, white) 55%,
+    color-mix(in oklab, #0077ff 14%, white) 100%
+  );
+}
+
+/* The brand's three colours from the mark, as blurred light behind the page:
+   the pale blue is the ground, cyan a glow, the strong blue only in corners so
+   it never takes over. Off-white (`--background`) is what they fade into. */
+.login-mesh {
+  background:
+    radial-gradient(55% 60% at 8% 6%, #c5dbfe 0%, transparent 72%),
+    radial-gradient(40% 38% at 34% 70%, color-mix(in oklab, #00d0d4 30%, transparent) 0%, transparent 72%),
+    radial-gradient(30% 34% at 100% 0%, color-mix(in oklab, #0077ff 42%, transparent) 0%, transparent 72%),
+    radial-gradient(28% 30% at 0% 100%, color-mix(in oklab, #0077ff 22%, transparent) 0%, transparent 72%),
+    radial-gradient(70% 80% at 28% 40%, #e6efff 0%, transparent 78%),
+    var(--background);
+}
+.login-blob {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(72px);
+  will-change: transform;
+  animation: login-drift 24s ease-in-out infinite alternate;
+}
+.login-blob:nth-child(2) { animation-duration: 31s; animation-direction: alternate-reverse; }
+.login-blob:nth-child(3) { animation-duration: 27s; }
+@keyframes login-drift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to { transform: translate3d(5%, -4%, 0) scale(1.08); }
+}
+/* `none`, not the global 0.01ms: an infinite alternate at 0.01ms jitters. */
+@media (prefers-reduced-motion: reduce) {
+  .login-blob { animation: none !important; }
+}

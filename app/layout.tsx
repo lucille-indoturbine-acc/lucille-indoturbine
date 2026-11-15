@@ -1,0 +1,108 @@
+import type { Metadata } from "next";
+import { Inter } from "next/font/google";
+import "./globals.css";
+import { Suspense } from "react";
+import LiveProjectSwitcher, {
+  ProjectSwitcherFallback,
+} from "@/components/layout/LiveProjectSwitcher";
+import Sidebar from "@/components/layout/Sidebar";
+import { AccessGate } from "@/components/layout/AccessGate";
+import StorageWarning from "@/components/layout/StorageWarning";
+import { MotionRoot } from "@/components/motion/MotionRoot";
+import { FIT_SCRIPT } from "@/lib/fit-screen";
+import { BARE_SCRIPT, LOCK_SCRIPT } from "@/lib/access-lock";
+import { Toaster } from "@/components/ui/sonner";
+
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+});
+
+export const metadata: Metadata = {
+  // A template, not a bare string: every page below sets its own title
+  // ('Projects', 'Dashboard', …), and without this the browser tab — the one
+  // place a desktop user reads the app's name — never said which app it was.
+  // The name goes FIRST. A tab is narrow and truncates from the RIGHT, so
+  // "Dashboard · Lucille" spent its visible half on the screen's own name and
+  // dropped the app's — which is the half that has to survive every navigation.
+  title: { default: "Lucille", template: "Lucille · %s" },
+  description: "Lucille - project control: plan, track progress and issue reports",
+};
+
+export default async function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  // THE LAYOUT NO LONGER READS A WEEK, and that is the fix rather than a
+  // tidy-up. It used to hand the sidebar `getLatestWeek(await getDb())`, and
+  // `getDb()` is db.json, which holds exactly ONE project: every week-scoped
+  // link in the menu was stamped with that project's week no matter which
+  // project was open, so a 22-week project's Data Overall pointed at week 36
+  // and 404d (17 Sep 2026). The open project is a cookie and cannot be read
+  // here at all without blocking every route, so the menu asks the index
+  // routes instead. See the note in components/layout/Sidebar.tsx.
+  return (
+    // data-scroll-behavior lets Next.js suspend smooth scrolling during route
+    // transitions so page changes don't visibly scroll-animate.
+    <html lang="en" data-scroll-behavior="smooth" className={`${inter.variable} h-full antialiased`} suppressHydrationWarning>
+      {/* THE APP IS LIGHT, DELIBERATELY. A `ThemeProvider` was mounted here for
+          a few hours and taken back out: the point of the token pass was one
+          palette written down once, not two palettes to keep in step. Every
+          surface reads its colour from the `@theme inline` block in
+          globals.css, so `bg-background` here is the same #f9fafb the app has
+          always had — the value simply has a name now.
+
+          The dormant `.dark` block at the bottom of globals.css is left where
+          it is. Turning it on is mounting a provider around this body and
+          nothing else; what it WOULD need first is the Daily section, which
+          still writes its greys by hand. */}
+      <body className="h-full flex flex-col lg:flex-row bg-background font-sans print:block print:h-auto">
+        {/* The motion provider wraps the WHOLE body, not <main>. Sidebar is a
+            sibling of <main>, and a provider around <main> alone would leave
+            the app's primary navigation outside it — where framer-motion
+            elements render featureless and simply sit still, with no error to
+            tell you. MotionRoot adds no DOM, so the flex layout above still
+            applies to Sidebar and the div exactly as it did. */}
+        {/* Full screen (desktop) is set before the first paint, so a reload
+            never flashes at normal size. See lib/fit-screen.ts. */}
+        <script dangerouslySetInnerHTML={{ __html: FIT_SCRIPT }} />
+        {/* A page this account cannot open never paints. See lib/access-lock.ts. */}
+        <script dangerouslySetInnerHTML={{ __html: LOCK_SCRIPT }} />
+        <script dangerouslySetInnerHTML={{ __html: BARE_SCRIPT }} />
+        <MotionRoot>
+          {/* The project card is the ONE thing in this layout that may not come
+              from the prerendered shell — a shell is per deployment, and the
+              open project changes between them. See LiveProjectSwitcher. */}
+          <Sidebar
+            switcher={
+              <Suspense fallback={<ProjectSwitcherFallback />}>
+                <LiveProjectSwitcher />
+              </Suspense>
+            }
+          />
+          {/* `min-w-0` is load-bearing, not tidiness. A flex child's default
+              `min-width: auto` sizes it to its CONTENT, so this column grew to
+              2262px inside a 1240px window the moment a page held something
+              wide — the schedule sheet and its timeline were pushed off screen
+              and the whole app scrolled sideways instead of the panes scrolling
+              inside themselves. Every page has been able to do this; the sheet
+              is simply the first one wide enough to show it. */}
+          <div className="flex-1 min-h-0 min-w-0 flex flex-col print:block print:h-auto">
+            <StorageWarning />
+            {/* No transition boundary here, deliberately. Knowing which route is
+                being rendered means reading the pathname, and an uncached read in
+                THIS file blocks every route in the app — it failed the build on
+                /print/daily/[date] once already. The boundaries live in the
+                sections and pages, which know who they are for free. */}
+            <main className="flex-1 min-h-0 overflow-auto [scrollbar-gutter:stable] print:h-auto print:overflow-visible">
+              {children}
+            </main>
+            <AccessGate />
+          </div>
+          <Toaster position="bottom-center" duration={2000} className="print:hidden" />
+        </MotionRoot>
+      </body>
+    </html>
+  );
+}

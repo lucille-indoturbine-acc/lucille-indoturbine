@@ -1,0 +1,391 @@
+'use client';
+
+import { useMemo, useState, useTransition } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { ArchiveRestore, Archive, FolderOpen, MoreHorizontal, Pencil, Search, Trash2 } from 'lucide-react';
+
+import type { ProjectCard } from '@/lib/projects';
+import {
+  deleteProjectAction,
+  renameProjectAction,
+  setActiveProjectAction,
+  setProjectArchivedAction,
+} from '@/lib/project-actions';
+import MiniGantt from './MiniGantt';
+import { formatMoney } from '@/lib/currency';
+import { matchesSearch, searchWords } from '@/lib/search';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import Spinner from '@/components/ui/Spinner';
+import SoftSheet from '@/components/ui/SoftSheet';
+
+/**
+ * The app's first screen.
+ *
+ * What it is NOT, deliberately: the cross-project money table this page used to
+ * be. Plan, actual, deviation, deferred, forecast and status all left — that is
+ * a report about projects, and this is the place you keep them. Percentages
+ * were the other casualty: a project made five minutes ago read 0.00% in red
+ * and looked broken when it was only empty.
+ *
+ * Row actions run through ONE shared dialog rather than a menu per card. That
+ * is the repo's Radix rule — cost is in mounted instances, not in the library —
+ * and it happens to be the better answer on a phone anyway, where a 44px list
+ * of choices beats a dropdown pinned to a 24px button.
+ */
+export default function ProjectList({ all }: { all: ProjectCard[] }) {
+  const [query, setQuery] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
+  const [acting, setActing] = useState<ProjectCard | null>(null);
+
+  const archivedCount = all.filter((p) => p.archivedAt).length;
+  const projects = showArchived ? all : all.filter((p) => !p.archivedAt);
+
+  const shown = useMemo(() => {
+    const words = searchWords(query);
+    return projects.filter((p) => matchesSearch(words, p.name, p.clientName, p.contractNo));
+  }, [projects, query]);
+
+  if (all.length === 0) {
+    return (
+      <div className="animate-enter rounded-xl border border-dashed bg-card p-10 text-center">
+        <p className="text-sm font-medium">No projects yet</p>
+        <p className="mx-auto mt-1 max-w-sm text-xs text-muted-foreground">
+          A project holds its own work breakdown, schedule and reports. Make the first one and
+          everything else in the app follows it.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="mb-4 flex items-center gap-2">
+        <div className="relative flex-1 sm:max-w-sm">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search name, client, contract"
+            aria-label="Search projects"
+            className="h-11 pl-9"
+          />
+        </div>
+      </div>
+
+      <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {shown.map((p, i) => (
+          <li
+            key={p.id}
+            className="animate-enter"
+            style={{ animationDelay: `${Math.min(i, 7) * 60}ms` }}
+          >
+            <Card project={p} onActions={() => setActing(p)} />
+          </li>
+        ))}
+      </ul>
+
+      {shown.length === 0 && (
+        <p className="animate-fade-in-up py-8 text-center text-sm text-muted-foreground">
+          Nothing matches “{query}”.
+        </p>
+      )}
+
+      {archivedCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowArchived((v) => !v)}
+          className="mt-5 h-11 text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+        >
+          {showArchived ? 'Hide archived' : `Archived (${archivedCount})`}
+        </button>
+      )}
+
+      {acting && <ActionsPanel project={acting} onClose={() => setActing(null)} />}
+    </>
+  );
+}
+
+function money(value: number | null, currency: string): string | null {
+  // One formatter, in lib/currency.ts. This page is where the bug showed:
+  // Gundih is priced in USD and a rupiah formatter turned $5.92M into
+  // "Rp 5.920.000" — a figure with the wrong symbol is a wrong number.
+  if (value == null || value <= 0) return null;
+  return formatMoney(value, currency);
+}
+
+function dateRange(start: string | null, finish: string | null): string | null {
+  if (!start || !finish) return null;
+  const f = (iso: string) =>
+    new Intl.DateTimeFormat('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' }).format(
+      Date.parse(`${iso}T00:00:00Z`)
+    );
+  // An arrow rather than a dash: the app already reads a dash as filler, and a
+  // range is the one place where the separator is carrying a direction anyway.
+  return `${f(start)} → ${f(finish)}`;
+}
+
+function Card({ project: p, onActions }: { project: ProjectCard; onActions: () => void }) {
+  const value = money(p.contractValue, p.currency);
+  const range = dateRange(p.startDate, p.finishDate);
+
+  return (
+    // THE WHOLE CARD IS THE LINK, and it is drawn that way rather than wired
+    // that way: the title's `after:inset-0` stretches its hit area over the
+    // card, so there is still exactly one anchor per card, keyboard focus lands
+    // on something real, and no interactive element is nested inside another —
+    // which is invalid HTML and the usual reason a clickable card misbehaves on
+    // a phone. Everything that must stay separately clickable sits above it on
+    // `relative z-10`.
+    <div className="group relative flex h-full flex-col rounded-xl border bg-card p-4 transition-all duration-300 ease-ios hover:border-muted-foreground hover:shadow-sm active:scale-[0.995] focus-within:border-muted-foreground focus-within:ring-[3px] focus-within:ring-ring/40">
+      <div className="flex items-start gap-2">
+        <span
+          aria-hidden
+          className="grid size-9 shrink-0 place-items-center rounded-lg bg-muted text-sm font-semibold uppercase"
+        >
+          {p.name.trim().charAt(0) || '?'}
+        </span>
+        <div className="min-w-0 flex-1">
+          <Link
+            href={`/projects/${p.id}`}
+            title={p.name}
+            // Three lines, then an ellipsis. Contract titles here run past a
+            // hundred characters — the Gundih one took five lines and pushed
+            // everything else on the card below the fold.
+            className="line-clamp-3 block text-[13px] font-semibold leading-snug outline-none after:absolute after:inset-0 after:rounded-xl after:content-[''] group-hover:underline"
+          >
+            {p.name}
+          </Link>
+          {/* `flex-wrap`, and it is load-bearing rather than tidy. These cards
+              sit in a grid whose single column below 640px is sized `auto`,
+              which means MAX MIN-CONTENT ACROSS EVERY CARD. A `shrink-0` badge
+              contributes its full width to that, so adding the alias grew the
+              track from 366px to 421.7px and every one of the four cards with
+              it: the row actions button ended up clipped at 390px on cards that
+              had no badge at all. Wrapping caps this row's min-content at its
+              widest single item instead of the sum, so a long client name drops
+              to its own line rather than widening the card. */}
+          <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-muted-foreground">
+            {/* THE ONE BLUE IN THIS APP THAT IS NOT AN ACTION, and it is a
+                deliberate exception to the rule at the top of globals.css.
+                Black on white said "open" in the same voice as every other
+                word on the card: on a phone, with the open project four cards
+                down, it was read as decoration and missed entirely (15 Sep
+                2026). The colour is doing the job a badge cannot do alone —
+                being seen before it is read — and it is the same blue as the
+                initial in the mobile top bar, so one colour answers "which
+                project is the app following" in both places. */}
+            {p.isActive && (
+              <span className="rounded bg-primary px-1.5 py-px text-[10px] font-semibold text-primary-foreground">
+                Open
+              </span>
+            )}
+            {/* In the META line, not in front of the name: the name above is
+                `line-clamp-3`, and a badge inserted into a clamped block
+                becomes part of what gets clamped. This row already exists to
+                carry badges, and it has the gap for one. */}
+            {p.alias && (
+              <span className="shrink-0 rounded bg-muted px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {p.alias}
+              </span>
+            )}
+            {/* `min-w-0` is what makes `truncate` actually truncate HERE. A
+                flex item's default `min-width` is `auto`, so a nowrap span
+                refuses to shrink below its text and widens the row instead.
+                With two badges in front of it the card grew past its grid
+                column and the row actions button was clipped at 390px:
+                measured, docOver stayed 0 because an ancestor clips, so the
+                page never scrolled and nothing said the button had gone. */}
+            <span className="min-w-0 truncate">{p.clientName || 'No client named yet'}</span>
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onActions}
+          aria-label={`Actions for ${p.name}`}
+          className="relative z-10 grid size-11 shrink-0 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <MoreHorizontal className="size-4" />
+        </button>
+      </div>
+
+      <div className="mt-auto pt-5">
+        {/* An empty project must read as EMPTY, not broken — so it gets a way
+            forward here instead of a bar with nothing in it. */}
+        {p.rowCount === 0 ? (
+          // A prompt, not a second link. The card already goes here, and two
+          // anchors to the same place is one for a screen reader to read twice.
+          <span className="flex h-11 items-center justify-center rounded-lg border border-dashed text-xs font-medium text-muted-foreground transition-colors group-hover:border-muted-foreground group-hover:text-foreground">
+            Not planned yet. Build the schedule →
+          </span>
+        ) : (
+          <>
+            <MiniGantt
+              startDate={p.startDate}
+              finishDate={p.finishDate}
+              totalWeeks={p.weekCount}
+            />
+            <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+              <span>{range ?? 'No dates'}</span>
+              <span className="tabular-nums">{p.rowCount} rows</span>
+            </div>
+          </>
+        )}
+        {value && (
+          <p className="mt-1.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+            {value}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** One instance for the whole list, driven by whichever card asked for it. */
+function ActionsPanel({ project: p, onClose: onExited }: { project: ProjectCard; onClose: () => void }) {
+  // Every way out plays the sheet's exit first; the parent hears it after.
+  const [open, setOpen] = useState(true);
+  const onClose = () => setOpen(false);
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  const [mode, setMode] = useState<'menu' | 'rename' | 'delete'>('menu');
+  const [name, setName] = useState(p.name);
+  const [error, setError] = useState<string | null>(null);
+
+  function run(fn: () => Promise<{ ok: boolean; error?: string }>) {
+    setError(null);
+    startTransition(async () => {
+      const res = await fn();
+      if (!res.ok) {
+        setError(res.error ?? 'Something went wrong');
+        return;
+      }
+      onClose();
+      router.refresh();
+    });
+  }
+
+  return (
+    <SoftSheet open={open} onClose={onClose} onExited={onExited} label={p.name} size="sm">
+        <p className="text-[11px] text-muted-foreground">Project</p>
+        <p className="mt-0.5 text-sm font-semibold leading-snug">{p.name}</p>
+
+        {mode === 'menu' && (
+          <div className="mt-3 space-y-1">
+            {!p.isActive && !p.archivedAt && (
+              <Row
+                onClick={() => run(() => setActiveProjectAction(p.id))}
+                disabled={pending}
+                icon={<FolderOpen className="size-4" />}
+                primary
+              >
+                Open this project
+              </Row>
+            )}
+            <Row onClick={() => setMode('rename')} disabled={pending} icon={<Pencil className="size-4" />}>
+              Rename
+            </Row>
+            <Row
+              onClick={() => run(() => setProjectArchivedAction(p.id, !p.archivedAt))}
+              disabled={pending}
+              icon={p.archivedAt ? <ArchiveRestore className="size-4" /> : <Archive className="size-4" />}
+            >
+              {p.archivedAt ? 'Restore from archive' : 'Archive'}
+            </Row>
+            <Row
+              onClick={() => setMode('delete')}
+              disabled={pending}
+              icon={<Trash2 className="size-4" />}
+              danger
+            >
+              Delete
+            </Row>
+          </div>
+        )}
+
+        {mode === 'rename' && (
+          <div className="mt-3 space-y-2">
+            <Label htmlFor="rn">New name</Label>
+            <Input id="rn" autoFocus value={name} onChange={(e) => setName(e.target.value)} className="h-11" />
+            {/* Save leads and Cancel follows, on one row. "Back" was wrong on
+                both counts: it named a direction rather than what pressing it
+                does, and it sat under the primary where nothing else in this
+                app puts a secondary action. */}
+            <div className="flex gap-2">
+              <Button
+                className="h-11 flex-1 gap-1.5"
+                disabled={pending || !name.trim() || name.trim() === p.name}
+                onClick={() => run(() => renameProjectAction(p.id, name))}
+              >
+                {pending && <Spinner />}
+                {pending ? 'Saving…' : 'Save'}
+              </Button>
+              <Button variant="ghost" className="btn-cancel h-11" onClick={() => setMode('menu')} disabled={pending}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {mode === 'delete' && (
+          <div className="mt-3 space-y-3">
+            {/* Naming what disappears, rather than asking "are you sure?". One
+                sentence: the paragraph this replaces also explained archiving,
+                which is a choice already sitting one row up in the menu. */}
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              Deletes {p.rowCount} work breakdown rows, the schedule, every week of progress and the
+              document register. This cannot be undone.
+            </p>
+            <div className="flex gap-2">
+              <Button
+                variant="destructive"
+                className="h-11 flex-1 gap-1.5"
+                disabled={pending}
+                onClick={() => run(() => deleteProjectAction(p.id))}
+              >
+                {pending && <Spinner />}
+                {pending ? 'Deleting…' : 'Delete permanently'}
+              </Button>
+              <Button variant="ghost" className="btn-cancel h-11" onClick={() => setMode('menu')} disabled={pending}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {error && <p className="mt-2 text-xs text-destructive animate-fade-in-up">{error}</p>}
+    </SoftSheet>
+  );
+}
+
+function Row({
+  children,
+  onClick,
+  disabled,
+  icon,
+  danger,
+  primary,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  icon?: React.ReactNode;
+  danger?: boolean;
+  primary?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex h-11 w-full items-center gap-2.5 rounded-lg px-3 text-left text-sm font-medium transition-colors hover:bg-muted disabled:opacity-50 ${
+        danger ? 'text-destructive hover:bg-muted' : primary ? 'text-primary' : ''
+      }`}
+    >
+      {icon}
+      {children}
+    </button>
+  );
+}

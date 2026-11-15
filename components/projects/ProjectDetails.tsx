@@ -1,0 +1,320 @@
+'use client';
+
+import { useEffect, useRef, useState, useTransition } from 'react';
+import { useRouter } from 'next/navigation';
+import SoftSheet from '@/components/ui/SoftSheet';
+import { AnimatePresence, m } from 'framer-motion';
+import { Check, Pencil } from 'lucide-react';
+
+import { MOTION } from '@/lib/design';
+import { formatMoney } from '@/lib/currency';
+import { INITIAL_LENGTH, deriveInitial } from '@/lib/initial';
+import { SIGNATURE_PARTS, signaturePart, type SignatureField } from '@/lib/signature';
+import { updateProjectFieldAction, type ProjectField } from '@/lib/project-actions';
+import { FIELDS as ENERGY_FIELDS, fieldOf } from '@/lib/fields';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import MoneyInput from '@/components/ui/MoneyInput';
+import NativeSelect from '@/components/ui/NativeSelect';
+import { Label } from '@/components/ui/label';
+
+/**
+ * Everything a project is, apart from its plan.
+ *
+ * None of these fields had a way in. `updateProjectFieldAction` was written,
+ * exported and never called from anywhere — so a project made in this app could
+ * not be given a contractor, a contract number, a site or a document-number
+ * prefix, and Document Control cannot number a single drawing without that last
+ * one.
+ *
+ * The contract value sits here because it is SIGNED, not derived. Deriving it
+ * from the prices forced the signed figure and the allocated one to be equal by
+ * construction, which deleted the gap between them — the number that says how
+ * much of the contract still has no price against it.
+ *
+ * Motion comes from `MOTION` in lib/design.ts: `duration` for a reply the user
+ * just asked for, `ease` for the curve. Nothing here invents its own numbers.
+ */
+
+interface Project {
+  id: string;
+  name: string;
+  alias: string | null;
+  documentNoWeekly: string | null;
+  documentNoDaily: string | null;
+  /** JSON `{ company, name }` each. Read through lib/signature.ts. */
+  signatureLeft: string | null;
+  signatureRight: string | null;
+  clientName: string | null;
+  contractorName: string | null;
+  contractNo: string | null;
+  workLocation: string | null;
+  docNoPrefix: string | null;
+  contractValue: number | null;
+  currency: string;
+  startDate: string | null;
+  finishDate: string | null;
+  /** lib/fields.ts; null reads as EPC. */
+  field: string | null;
+}
+
+const FIELDS: {
+  key: ProjectField;
+  label: string;
+  hint?: string;
+  type?: 'text' | 'date' | 'number' | 'field';
+  /** Caps the input, for the initial. */
+  maxLength?: number;
+  /** Uppercases as you type, for the initial. */
+  upper?: boolean;
+}[] = [
+  { key: 'name', label: 'Project name' },
+  { key: 'field', label: 'Field', hint: 'The line of energy work. It sets the kinds of work a row can be.', type: 'field' },
+  {
+    key: 'alias',
+    label: 'Project initial',
+    hint: 'Three letters, used wherever the full name will not fit. Clear it to go back to the full name.',
+    maxLength: INITIAL_LENGTH,
+    upper: true,
+  },
+  { key: 'clientName', label: 'Client', hint: 'Who the work is for' },
+  { key: 'contractorName', label: 'Contractor', hint: 'Who signs for the work' },
+  { key: 'contractNo', label: 'Contract number', hint: 'Several work package numbers can share one line' },
+  { key: 'workLocation', label: 'Work location' },
+  {
+    key: 'docNoPrefix',
+    label: 'Document number prefix',
+    hint: 'Document Control builds every drawing number from this, e.g. PRGG-00-G0',
+  },
+  {
+    key: 'documentNoWeekly',
+    label: 'Weekly report number',
+    hint: 'Printed in the weekly report header, e.g. PRGG-00-G0-RPT-002',
+  },
+  {
+    key: 'documentNoDaily',
+    label: 'Daily report number',
+    hint: 'Printed in the daily report header',
+  },
+  { key: 'contractValue', label: 'Contract value', type: 'number', hint: 'The signed figure' },
+  { key: 'startDate', label: 'Starts', type: 'date' },
+  { key: 'finishDate', label: 'Finishes', type: 'date' },
+  // The two blocks at the foot of every printed report. LEFT is the client and
+  // RIGHT is the contractor, which is the order the imported project's own
+  // signed reports print in — `lib/dashboard-db.ts` had them the other way
+  // round and dropped both names.
+  {
+    key: 'signatureLeftCompany',
+    label: 'Signature, left: company',
+    hint: 'The client side of the printed signature block',
+  },
+  { key: 'signatureLeftName', label: 'Signature, left: name', hint: 'Who signs for them' },
+  {
+    key: 'signatureRightCompany',
+    label: 'Signature, right: company',
+    hint: 'The contractor side',
+  },
+  { key: 'signatureRightName', label: 'Signature, right: name', hint: 'Who signs for them' },
+];
+
+export default function ProjectDetails({ project }: { project: Project }) {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<{ field: ProjectField; message: string } | null>(null);
+  const [saved, setSaved] = useState<ProjectField | null>(null);
+
+  // `#edit=contractValue`: "Raise the contract value" on Weights, the project
+  // strip and the dashboard lands HERE, dialog open and that field focused,
+  // so nobody hunts for which button holds it (8 Oct 2026). On arrival and on
+  // a hash change, because the strip links to it from this same page.
+  const focusField = useRef<string | null>(null);
+  useEffect(() => {
+    const go = () => {
+      const m = /edit=([^&]+)/.exec(window.location.hash);
+      if (!m) return;
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+      focusField.current = decodeURIComponent(m[1]);
+      setOpen(true);
+    };
+    const arrival = window.setTimeout(go, 0);
+    window.addEventListener('hashchange', go);
+    return () => {
+      window.clearTimeout(arrival);
+      window.removeEventListener('hashchange', go);
+    };
+  }, []);
+  useEffect(() => {
+    if (!open || !focusField.current) return;
+    const el = document.getElementById(`pd-${focusField.current}`) as HTMLInputElement | null;
+    focusField.current = null;
+    el?.scrollIntoView({ block: 'center' });
+    el?.focus();
+    el?.select();
+  }, [open]);
+
+  const valueOf = (k: ProjectField): string => {
+    // The four signature halves are not columns: two JSON columns hold them,
+    // so they are read through the one module that knows that shape.
+    if (k in SIGNATURE_PARTS) return signaturePart(project, k as SignatureField);
+    if (k === 'field') return fieldOf(project.field).id;
+    const v = project[k as keyof Project];
+    if (v == null) return '';
+    return String(v);
+  };
+
+  // Saved on blur, one field at a time. A form with a Save button would mean
+  // losing everything typed if one value is rejected, and every other surface in
+  // this app already commits per field.
+  const commit = (field: ProjectField, next: string) => {
+    if (next === valueOf(field)) return;
+    setError(null);
+    startTransition(async () => {
+      const res = await updateProjectFieldAction(project.id, field, next);
+      if (!res.ok) {
+        // Under the field it belongs to: at the foot of a long dialog the
+        // contract refusal went unseen.
+        setError({ field, message: res.error });
+        return;
+      }
+      setSaved(field);
+      window.setTimeout(() => setSaved(null), 1400);
+      router.refresh();
+    });
+  };
+
+  return (
+    <>
+      <m.button
+        type="button"
+        onClick={() => setOpen(true)}
+        whileTap={{ scale: 0.97 }}
+        transition={{ duration: MOTION.duration, ease: MOTION.ease }}
+        // Lucille violet, as Setup is in Document Control (8 Oct 2026).
+        aria-label="Project details"
+        className="inline-flex size-11 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-check text-[13px] font-medium text-white shadow-sm transition-colors duration-300 ease-ios hover:bg-check/90 hover:shadow-md sm:h-9 sm:w-auto sm:px-3"
+      >
+        <Pencil className="size-4" />
+        <span className="hidden sm:inline">Details</span>
+      </m.button>
+
+            <SoftSheet open={open} onClose={() => setOpen(false)} label="Project details">
+                  <h2 className="text-sm font-semibold">Project details</h2>
+
+                  <div className="mt-3 space-y-3">
+                    {FIELDS.map((f) => (
+                      <div key={f.key} className="space-y-1">
+                        <Label htmlFor={`pd-${f.key}`} className="flex items-center gap-1.5">
+                          {f.label}
+                          {f.key === 'contractValue' && (
+                            <span className="text-[10px] font-normal text-muted-foreground">
+                              {project.currency}
+                            </span>
+                          )}
+                          <AnimatePresence>
+                            {saved === f.key && (
+                              <m.span
+                                initial={{ opacity: 0, scale: 0.9 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                exit={{ opacity: 0 }}
+                                transition={{ duration: MOTION.duration, ease: MOTION.ease }}
+                                className="flex items-center gap-0.5 text-[10px] font-medium text-ok"
+                              >
+                                <Check className="size-3" />
+                                Saved
+                              </m.span>
+                            )}
+                          </AnimatePresence>
+                        </Label>
+                        {/* The contract value is the one field that groups as
+                            it is typed: ten raw digits are unreadable, and the
+                            same figure is printed under it a moment later. */}
+                        {f.type === 'field' ? (
+                          <NativeSelect
+                            id={`pd-${f.key}`}
+                            defaultValue={valueOf(f.key)}
+                            disabled={pending}
+                            onChange={(e) => commit(f.key, e.target.value)}
+                            className="h-11 rounded-md pl-3 shadow-xs"
+                          >
+                            {ENERGY_FIELDS.map((fd) => (
+                              <option key={fd.id} value={fd.id}>
+                                {fd.label}: {fd.help}
+                              </option>
+                            ))}
+                          </NativeSelect>
+                        ) : f.type === 'number' ? (
+                          <MoneyInput
+                            id={`pd-${f.key}`}
+                            defaultValue={valueOf(f.key)}
+                            resetKey={valueOf(f.key)}
+                            disabled={pending}
+                            onCommit={(raw) => commit(f.key, raw)}
+                            className="h-11 w-full rounded-md border bg-transparent px-3 py-1 text-base shadow-xs outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50 md:text-sm"
+                          />
+                        ) : (
+                          <Input
+                            id={`pd-${f.key}`}
+                            type={f.type === 'date' ? 'date' : 'text'}
+                            defaultValue={valueOf(f.key)}
+                            disabled={pending}
+                            maxLength={f.maxLength}
+                            // Uncontrolled, so the uppercasing is done to the
+                            // element rather than through state: the whole
+                            // dialog commits on blur and a controlled input
+                            // here would be a second source of truth.
+                            onChange={
+                              f.upper
+                                ? (e) => {
+                                    e.target.value = e.target.value.toUpperCase();
+                                  }
+                                : undefined
+                            }
+                            onBlur={(e) => commit(f.key, e.target.value)}
+                            // The guess, for a project that has no initial yet
+                            // — which is every project made before the column
+                            // existed, Gundih included.
+                            placeholder={
+                              f.key === 'alias' ? deriveInitial(project.name) || 'ABC' : undefined
+                            }
+                            autoCapitalize={f.upper ? 'characters' : undefined}
+                            spellCheck={f.upper ? false : undefined}
+                            className={
+                              f.upper
+                                ? 'h-11 w-24 text-center text-base font-semibold uppercase tracking-[0.2em]'
+                                : 'h-11'
+                            }
+                          />
+                        )}
+                        {/* The value field keeps its raw digits — 5920000.006405001
+                            is what was signed and rounding it in the box would
+                            commit the rounding on the next keystroke. The readable
+                            form goes under it instead, stated once. */}
+                        {f.key === 'contractValue' && project.contractValue ? (
+                          <p className="text-[11px] text-muted-foreground">
+                            Reads as{' '}
+                            <strong className="font-medium text-foreground tabular-nums">
+                              {formatMoney(project.contractValue, project.currency)}
+                            </strong>
+                          </p>
+                        ) : (
+                          f.hint && <p className="text-[11px] text-muted-foreground">{f.hint}</p>
+                        )}
+                        {error?.field === f.key && (
+                          <p role="alert" className="text-xs font-semibold text-destructive">
+                            {error.message}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+
+                  <Button className="mt-4 h-11 w-full" onClick={() => setOpen(false)}>
+                    Done
+                  </Button>
+      </SoftSheet>
+    </>
+  );
+}
+

@@ -1,0 +1,68 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+# Preview build dirs (NEXT_DIST_DIR=.next-preview, .next-preview2, …) — one per
+# concurrent dev/preview server. Pure build cache, regenerated on demand.
+/.next-preview*/
+/.next-buildcheck/
+/.next-build/
+/.worktrees/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+.env
+.env.local
+/.next-verify/
+.next-dev*.log
+
+# Screenshots and throwaway output from the verify scripts.
+/scratch/
+
+# Skill klon terpisah (punya .git sendiri) — bukan bagian aplikasi ini.
+/excalidraw-diagram-skill/
+
+# accounts and sessions on a developer machine (lib/auth-store.ts)
+/data/auth.json
+/data/auth.key
+
+# Supabase local dev
+/supabase/.temp/
+
+# Throwaway build/test output
+build-output.txt
+test-db.mjs

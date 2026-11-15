@@ -1,0 +1,117 @@
+'use client';
+
+import { m } from 'framer-motion';
+import { useOptimistic, useTransition, type ReactNode } from 'react';
+import { pressMotion } from '@/components/motion/Press';
+import { setCurrentWeekAction } from '@/lib/actions';
+import { announceCurrentWeek } from '@/components/layout/current-week-signal';
+import WeekSelect from './WeekSelect';
+
+/**
+ * The week picker and whether that week is current: the top row of Weekly
+ * Progress, Data Overall and Document Control alike.
+ *
+ * THE WEEK AND WHETHER IT IS CURRENT SIT TOGETHER. On 25 Sep 2026 the stepper
+ * ran between the week picker and the "Set Week N as Current" button, so the
+ * button was half a screen from the week it acted on and he could not tell
+ * where "current" lived. Now the badge and the button take the SAME seat,
+ * right of the picker: one replaces the other, and the row reads "Week 31 ·
+ * Current" or "Week 31 · Set as current".
+ *
+ * THE SEAT STRETCHES (25 Sep 2026, from a mockup he picked). Put this row in a
+ * column that hugs the tab bar beneath it and the badge or the button fills
+ * what the picker leaves, at the picker's height, so the two rows share both
+ * edges and the seat keeps its size when one state replaces the other.
+ * Stretched rather than pushed to the far end: moved away from the picker, the
+ * button stops reading as the picker's.
+ *
+ * One component because Document Control used to draw its own copy: a smaller
+ * pill, in its own greens, and no button at all when the week was not current.
+ * The dashboard drew a third (a small capsule badge and a solid green button)
+ * until 26 Sep 2026, so the same control changed shape between sections.
+ */
+export default function WeekRow({
+  weeks,
+  selectedWeek,
+  projectCurrentWeek,
+  activeTab,
+  basePath,
+  hrefPattern,
+  prefetch,
+  anchorEnd,
+  compact,
+  children,
+}: {
+  weeks: number[];
+  selectedWeek: number;
+  projectCurrentWeek: number;
+  /** The tab the picker keeps you on when it changes week. */
+  activeTab: string;
+  basePath?: string;
+  /** Passed to the picker: the dashboard links weeks as `/?week={week}`. */
+  hrefPattern?: string;
+  prefetch?: boolean;
+  /** Week one's end date, for the dates under each week in the picker. */
+  anchorEnd?: string;
+  /** Passed to the picker: a narrower trigger on a phone, for a row that also holds buttons. */
+  compact?: boolean;
+  /**
+   * Anything that ends the row, after the seat. On a phone the seat gives way
+   * to it: "Set as current" goes onto two lines rather than off the screen.
+   */
+  children?: ReactNode;
+}) {
+  const [isPending, startTransition] = useTransition();
+  // Optimistic: the green "Current" badge flips instantly on click; the server
+  // action confirms in the background and the value reverts only on failure.
+  const [optimisticCurrent, setOptimisticCurrent] = useOptimistic(projectCurrentWeek);
+  const isCurrent = selectedWeek === optimisticCurrent;
+
+  function setAsCurrent() {
+    // The sidebar card follows in the same frame; see current-week-signal.
+    announceCurrentWeek(selectedWeek);
+    startTransition(async () => {
+      setOptimisticCurrent(selectedWeek);
+      const res = await setCurrentWeekAction(selectedWeek);
+      if (!res.ok) {
+        announceCurrentWeek(null);
+        alert(res.error);
+      }
+    });
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <WeekSelect
+        weeks={weeks}
+        selectedWeek={selectedWeek}
+        projectCurrentWeek={optimisticCurrent}
+        activeTab={activeTab}
+        basePath={basePath}
+        hrefPattern={hrefPattern}
+        prefetch={prefetch}
+        anchorEnd={anchorEnd}
+        compact={compact}
+      />
+      {isCurrent ? (
+        <span className="inline-flex min-h-11 min-w-0 flex-1 animate-pop-in items-center justify-center gap-2 overflow-hidden whitespace-nowrap rounded-lg bg-ok-soft px-3.5 text-sm font-semibold text-ok max-sm:px-2">
+          <span className="h-2 w-2 shrink-0 rounded-full bg-ok" />
+          Current
+        </span>
+      ) : (
+        // The badge's own outline, before it is filled in: a hollow dot in
+        // the same green, so the two read as one control in two states.
+        <m.button {...pressMotion}
+          onClick={setAsCurrent}
+          disabled={isPending}
+          className="inline-flex min-h-11 min-w-0 flex-1 animate-scale-in items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-ok/40 bg-card px-3.5 text-sm font-semibold text-ok shadow-sm transition-colors duration-300 ease-ios hover:bg-ok-soft disabled:opacity-70 max-sm:px-2 max-sm:text-center max-sm:leading-tight max-sm:whitespace-normal"
+          title="Pin this as the week the project is in. It is where the app opens, until you move it or clear it."
+        >
+          <span aria-hidden className="h-2 w-2 shrink-0 rounded-full border-2 border-ok" />
+          Set as current
+        </m.button>
+      )}
+      {children}
+    </div>
+  );
+}

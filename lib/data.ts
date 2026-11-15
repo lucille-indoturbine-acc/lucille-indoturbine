@@ -1,0 +1,316 @@
+import { cacheLife, cacheTag } from 'next/cache';
+import { readJsonProject, readWorkspace } from './db';
+import {
+  computeGrandTotal,
+  computeRollup,
+  promoteNestedSpkContracts,
+  type GrandTotal,
+  type RollupNode,
+} from './rollup';
+import { buildSCurveSeries, type SCurveRow } from './scurve';
+import { listProjects, type ProjectSummary, type Workspace } from './workspace';
+import { buildProjectDashboardData } from './dashboard-db';
+import { jsonKeyFor, jsonSeedFor } from './legacy-bridge';
+import { getActiveProjectId } from './projects';
+import { currentWeekOf } from './current-week';
+import { r2, shownDiff } from './figures';
+import { weightGate } from './weight-gate';
+import type { Database, WeeklyMeta } from './types';
+
+export function getWeekMeta(db: Database, week: number): WeeklyMeta | null {
+  return db.weeks.find((w) => w.week === week) ?? null;
+}
+
+export function getPrevWeekMeta(db: Database, week: number): WeeklyMeta | null {
+  return db.weeks.find((w) => w.week === week - 1) ?? null;
+}
+
+/**
+ * REMOVED, and left named here so it is not reintroduced by habit:
+ * `getLatestWeek(db)` was `currentWeek || max(weeks)`, and both halves were
+ * wrong for the one thing every caller used it for — deciding which week to
+ * open. `currentWeek` is the last week with ACTUALS, which is 0 on a project
+ * nobody has filed yet, and `max(weeks)` is the END of the plan, so a fresh
+ * 22-week project opened on week 22 and 404d out of it. Use `currentWeekOf`
+ * from `lib/current-week.ts`: it asks the dates, which every project has.
+ */
+
+export interface WeekRollup {
+  meta: WeeklyMeta;
+  prevMeta: WeeklyMeta | null;
+  roots: RollupNode[];
+  grandTotal: GrandTotal;
+}
+
+export function getWeekRollup(db: Database, week: number): WeekRollup | null {
+  const meta = getWeekMeta(db, week);
+  if (!meta) return null;
+  const prevMeta = getPrevWeekMeta(db, week);
+  const roots = promoteNestedSpkContracts(
+    computeRollup(db.wbsItems, meta.leafData, prevMeta?.leafData ?? null)
+  );
+  return { meta, prevMeta, roots, grandTotal: computeGrandTotal(roots) };
+}
+
+/**
+ * The project list for the sidebar.
+ *
+ * Cached like `getDb()` and for the same reason: this is read in the root
+ * layout, so an uncached call here blocks every route in the app — including
+ * `/_not-found`, which fails the build with "Uncached data was accessed
+ * outside of <Suspense>". See AGENTS.md.
+ */
+export async function getProjects(): Promise<ProjectSummary[]> {
+  'use cache';
+  cacheTag('db');
+  cacheLife('max');
+
+  return listProjects(await readWorkspace());
+}
+
+/** Cached workspace, for the portfolio view. Same reason as `getProjects()`. */
+export async function getWorkspace(): Promise<Workspace> {
+  'use cache';
+  cacheTag('db');
+  cacheLife('max');
+
+  return readWorkspace();
+}
+
+/* ------------------------------------------------- the project that is OPEN */
+
+/**
+ * The weekly report, for whichever project is open. EVERY project reads SQLite,
+ * through the same adapter the dashboard uses (`lib/dashboard-db.ts`), and
+ * uncached: cached would mean a planner edit not showing until something
+ * expired the tag.
+ *
+ * Until 26 Sep 2026 there was a fork here. The imported project, Gundih, kept
+ * reading db.json through cached functions because its two stores disagreed by
+ * up to 12.85 points and a signed report must not move. Gundih was removed that
+ * day (it had only ever been a reference), and the fork went with it: no
+ * project reads weekly figures from db.json any more. db.json still holds each
+ * project's DAILY reports and catalogs — see `getOpenJsonDb` below.
+ */
+/**
+ * A project the database cannot find at all — deleted in another tab, or an
+ * id from a stale cookie. An EMPTY database rather than null, so the pages
+ * keep their plain shape: every one of them already renders "nothing to show"
+ * correctly, and a nullable `Database` would put an `if` in front of every
+ * read in the weekly section to describe a case none of them can do anything
+ * about.
+ */
+const NO_PROJECT: Database = {
+  project: {
+    name: '',
+    contractNo: '',
+    customer: '',
+    contractor: '',
+    workLocation: '',
+    documentNoWeekly: '',
+    documentNoDaily: '',
+    signatureLeft: { company: '', name: '' },
+    signatureRight: { company: '', name: '' },
+    weekAnchorEndDate: '',
+    currentWeek: 0,
+  },
+  wbsItems: [],
+  weeks: [],
+  scurvePlan: [],
+  scurveActual: [],
+  daily: [],
+  schedule: [],
+};
+
+export async function getOpenDb(): Promise<Database> {
+  const id = await getActiveProjectId();
+  if (!id) return NO_PROJECT;
+  return (await buildProjectDashboardData(id))?.db ?? NO_PROJECT;
+}
+
+/* ------------------------------------ the JSON store, read PER PROJECT */
+
+/**
+ * One project's JSON record, cached by its key.
+ *
+ * Cacheable precisely because the key is an ARGUMENT: `getDb()` can only ever
+ * cache "whatever the file calls active", which is the shared answer that made
+ * every project's daily report Gundih's. Keyed, each project gets its own
+ * entry and the same 'db' tag expires them all on any write.
+ */
+async function getJsonProject(key: string): Promise<Database | null> {
+  'use cache';
+  cacheTag('db');
+  cacheLife('max');
+
+  return readJsonProject(key);
+}
+
+/**
+ * Daily reports and the project's own catalogs, for whichever project is open.
+ *
+ * A project that has never saved one gets the seed rather than nothing, so the
+ * screen opens on an empty list belonging to THIS project — with its name and
+ * contract already in the header — instead of refusing to draw at all.
+ */
+export async function getOpenJsonDb(): Promise<Database> {
+  const id = await getActiveProjectId();
+  if (!id) return NO_PROJECT;
+  return (await getJsonProject(jsonKeyFor(id))) ?? await jsonSeedFor(id);
+}
+
+/** The same, for the PDF — told which project rather than asking. See `getPrintDb`. */
+export async function getPrintJsonDb(projectId: string | null): Promise<Database> {
+  if (!projectId) return getOpenJsonDb();
+  return (await getJsonProject(jsonKeyFor(projectId))) ?? await jsonSeedFor(projectId);
+}
+
+export async function getOpenWeekRollup(week: number): Promise<WeekRollup | null> {
+  const id = await getActiveProjectId();
+  if (!id) return null;
+  const db = (await buildProjectDashboardData(id))?.db;
+  return db ? getWeekRollup(db, week) : null;
+}
+
+/**
+ * The open project's headline for the sidebar card: its current week, and the
+ * same Plan / Actual / Deviation the Fill in screen prints for that week —
+ * `targetWF`, `curProgressPct` and `variance` off the one rollup, so the card
+ * and the page can never disagree.
+ *
+ * Null when there is nothing honest to show: no project, no week, or a plan
+ * nobody has given a budget yet (every figure would be a 0.00% that reads as
+ * something somebody typed). Reads the clock through `currentWeekOf`, so it
+ * must be called after a request read — `LiveProjectSwitcher` awaits
+ * `connection()` first.
+ */
+export interface OpenProjectStatus {
+  week: number;
+  actual: number;
+  plan: number;
+  variance: number;
+  /**
+   * False while the weights do not close (lib/weight-gate.ts): the card then
+   * shows the weight total instead of figures, like every other screen.
+   */
+  ready: boolean;
+  weightsTotal: number;
+  /**
+   * Every week's Actual and Plan, worked out exactly as the figures above, so
+   * the card can follow "Set as current" the moment it is pressed instead of
+   * after the write, the snapshot push and the re-render (seconds on the
+   * deployment, 28 Sep 2026). Empty while the weights do not close.
+   */
+  byWeek: Record<number, { actual: number; plan: number }>;
+  /** Week ONE's end date, so a day can find the week it falls in (`weekOfDate`). */
+  anchorEnd: string;
+}
+
+/**
+ * The open project's week grid, from its dates alone: week one's end and the plan's
+ * last week. The daily screens group, label and number their days by it. It used to
+ * be read off `getOpenProjectStatus`, which is null until the weights close, so a
+ * project with no budgets yet showed no weeks and no "Day N" at all.
+ */
+export async function getOpenWeekGrid(): Promise<{ anchorEnd: string; lastWeek: number } | null> {
+  const id = await getActiveProjectId();
+  if (!id) return null;
+  const db = (await buildProjectDashboardData(id))?.db;
+  if (!db || db.weeks.length === 0 || !db.project.weekAnchorEndDate) return null;
+  return { anchorEnd: db.project.weekAnchorEndDate, lastWeek: Math.max(...db.weeks.map((w) => w.week)) };
+}
+
+export async function getOpenProjectStatus(): Promise<OpenProjectStatus | null> {
+  const id = await getActiveProjectId();
+  if (!id) return null;
+  return getProjectStatus(id);
+}
+
+/**
+ * The same, for a NAMED project: the daily PDF is told which project it is for
+ * and cannot ask. Reads the clock through `currentWeekOf`, so call it after a
+ * request read.
+ */
+export async function getProjectStatus(id: string): Promise<OpenProjectStatus | null> {
+  const db = (await buildProjectDashboardData(id))?.db;
+  if (!db || db.weeks.length === 0) return null;
+
+  const week = currentWeekOf(db);
+  // Built fresh, as `getOpenWeekRollup` does, so a save shows on the next
+  // navigation.
+  const rollup = getWeekRollup(db, week);
+  if (!rollup || rollup.grandTotal.bobot <= 0) return null;
+
+  const gate = weightGate(db.wbsItems);
+  const anchorEnd = db.project.weekAnchorEndDate;
+  if (!gate.ok) {
+    return { week, actual: 0, plan: 0, variance: 0, ready: false, weightsTotal: gate.total, byWeek: {}, anchorEnd };
+  }
+  // Plan as a share of the total weight, like actual — it read raw `targetWF`
+  // and said "Plan 24.76% · 11.40% ahead" beside a dashboard saying 34.98% and
+  // 16.11% for the same week (26 Sep 2026). Rounded as printed, so the three
+  // figures on the card subtract.
+  const actual = r2(rollup.grandTotal.curProgressPct);
+  const plan = r2(rollup.grandTotal.planPct);
+  const byWeek: OpenProjectStatus['byWeek'] = {};
+  for (const w of db.weeks) {
+    const r = w.week === week ? rollup : getWeekRollup(db, w.week);
+    if (r) byWeek[w.week] = { actual: r2(r.grandTotal.curProgressPct), plan: r2(r.grandTotal.planPct) };
+  }
+  return { week, actual, plan, variance: shownDiff(actual, plan), ready: true, weightsTotal: gate.total, byWeek, anchorEnd };
+}
+
+export async function getOpenSCurveSeries(upToWeek: number): Promise<SCurveRow[]> {
+  const id = await getActiveProjectId();
+  if (!id) return [];
+  const db = (await buildProjectDashboardData(id))?.db;
+  return db ? buildSCurveSeries(db, upToWeek) : [];
+}
+
+/**
+ * The same choice of store, for the PDF — but told WHICH project rather than
+ * asked.
+ *
+ * The PDF is rendered by a headless Chromium that `lib/pdf.ts` launches with no
+ * cookies, so `/print/*` cannot ask which project is open: it would fall back
+ * to `app_state`, and on a deployment where somebody chose a project in their
+ * own browser those two are exactly the pair that disagree. A PDF of the wrong
+ * project is the worst bug this app has, because it is the one that leaves the
+ * building. So the API route resolves the project in the USER's request and
+ * names it in the URL — explicit beats ambient, and the file then says which
+ * project it was built for.
+ *
+ * An unknown id yields an empty database rather than somebody else's: this page
+ * is reachable without the route in front of it.
+ */
+export async function getPrintDb(projectId: string | null): Promise<Database> {
+  if (!projectId) return getOpenDb();
+  return (await buildProjectDashboardData(projectId))?.db ?? NO_PROJECT;
+}
+
+/**
+ * Which week a NAMED project is in — the same question `/weekly` asks, asked
+ * before the navigation instead of during it.
+ *
+ * Opening a project used to send the browser to `/weekly` and let that index
+ * redirect, which spends a second round trip on a screen with nothing on it:
+ * 475 ms of empty main area, measured on a warm dev server.
+ * `setActiveProjectAction` answers it on the spot instead, so the press lands
+ * on `/weekly/N/overall` directly and the route's own skeleton covers the wait.
+ *
+ * The RULE is still `currentWeekOf` and nothing here decides anything — this is
+ * `getPrintDb`'s "told which project rather than asking" pointed at a second
+ * caller. Not cached, and it must not be: it reads the clock.
+ */
+export async function currentWeekForProject(projectId: string | null): Promise<number> {
+  return currentWeekOf(await getPrintDb(projectId));
+}
+
+export async function getPrintWeekRollup(
+  projectId: string | null,
+  week: number
+): Promise<WeekRollup | null> {
+  if (!projectId) return getOpenWeekRollup(week);
+  const db = (await buildProjectDashboardData(projectId))?.db;
+  return db ? getWeekRollup(db, week) : null;
+}

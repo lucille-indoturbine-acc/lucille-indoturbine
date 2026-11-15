@@ -1,0 +1,145 @@
+import { promises as fs } from 'fs';
+import { existsSync } from 'fs';
+import path from 'path';
+import { gzipSync, gunzipSync } from 'zlib';
+import { revalidateTag } from 'next/cache';
+import { redisConfigured, redisGet, redisSet } from './storage';
+import { migrate, type StoredShape, type Workspace } from './workspace';
+import type { Database } from './types';
+import { jsonKeyFor, jsonSeedFor } from './legacy-bridge';
+import { getActiveProjectId } from './projects';
+
+const SOURCE_PATH = path.join(process.cwd(), 'data', 'db.json');
+const IS_VERCEL = !!process.env.VERCEL;
+const WRITABLE_PATH = IS_VERCEL ? '/tmp/db.json' : SOURCE_PATH;
+
+// Whole database as one Redis value, gzip+base64 so a ~700KB JSON travels as
+// a few dozen KB per read/write.
+const DB_KEY = 'weekly-report:db';
+
+let seeded = false;
+
+async function ensureWritable(): Promise<void> {
+  if (!IS_VERCEL || seeded) return;
+  if (!existsSync(WRITABLE_PATH)) {
+    await fs.copyFile(SOURCE_PATH, WRITABLE_PATH);
+  }
+  seeded = true;
+}
+
+let queue: Promise<unknown> = Promise.resolve();
+
+async function readStored(): Promise<StoredShape> {
+  if (redisConfigured) {
+    const raw = await redisGet(DB_KEY);
+    if (raw !== null) {
+      return JSON.parse(gunzipSync(Buffer.from(raw, 'base64')).toString('utf-8')) as StoredShape;
+    }
+    // First run against an empty store — serve the bundled seed data. It
+    // becomes durable on the first write (writeWorkspace persists to Redis).
+    return JSON.parse(await fs.readFile(SOURCE_PATH, 'utf-8')) as StoredShape;
+  }
+  await ensureWritable();
+  const raw = await fs.readFile(WRITABLE_PATH, 'utf-8');
+  return JSON.parse(raw) as StoredShape;
+}
+
+/**
+ * The whole workspace. Legacy single-project files are wrapped on the way out,
+ * never rewritten on read — a file only changes shape once something is saved.
+ */
+export async function readWorkspace(): Promise<Workspace> {
+  return migrate(await readStored());
+}
+
+async function writeWorkspace(ws: Workspace): Promise<void> {
+  const json = JSON.stringify(ws);
+  if (redisConfigured) {
+    await redisSet(DB_KEY, gzipSync(Buffer.from(json, 'utf-8')).toString('base64'));
+    return;
+  }
+  await ensureWritable();
+  await fs.writeFile(WRITABLE_PATH, json, 'utf-8');
+}
+
+/* ------------------------------------------------ one project at a time */
+
+/**
+ * One project's JSON record, by workspace key. Null when it has none yet —
+ * which is every project that has not saved a daily report, and is a state the
+ * callers render rather than an error.
+ */
+export async function readJsonProject(key: string): Promise<Database | null> {
+  const ws = migrate(await readStored());
+  return ws.projects[key] ?? null;
+}
+
+/**
+ * The OPEN project's record, uncached.
+ *
+ * The read-your-own-writes path: the cached copy in `lib/data.ts` can lag a
+ * lambda that has not seen the latest tag purge, and a daily report that was
+ * just created must never look missing to the person who created it.
+ */
+export async function readOpenDb(): Promise<Database | null> {
+  const id = await getActiveProjectId();
+  if (!id) return null;
+  return readJsonProject(jsonKeyFor(id));
+}
+
+/**
+ * Mutate the OPEN project's record, creating it on the first write.
+ *
+ * The project decides the record, so each one writes into its own: daily
+ * reports, catalogs and weekly photos. (`mutateDb`, which edited whatever the
+ * FILE calls active, was removed when the weekly photo route — its last
+ * caller — moved here.)
+ */
+export async function mutateOpenDb<T>(mutator: (db: Database) => T | Promise<T>): Promise<T> {
+  const id = await getActiveProjectId();
+  if (!id) throw new Error('No project is open.');
+  return mutateProjectDb(id, mutator);
+}
+
+/**
+ * The same write, into a NAMED project rather than into whichever one is open.
+ *
+ * A screen that is already rendered knows which project its rows came from;
+ * "which project is open" is a second question, asked later, that can answer
+ * differently — a cached page, a cookie that moved on, two tabs. When the two
+ * disagree the row ids on screen belong to one store and the write goes to
+ * another, and the only symptom is `Item not found` on every save. The panel
+ * passes the id the page was rendered for, the same way `lib/pdf.ts` passes
+ * `?project=` because headless Chromium has no cookie to ask.
+ */
+export async function mutateProjectDb<T>(
+  projectId: string,
+  mutator: (db: Database) => T | Promise<T>
+): Promise<T> {
+  const key = jsonKeyFor(projectId);
+  const id = projectId;
+  return mutateWorkspace(async (ws) => {
+    let project = ws.projects[key];
+    if (!project) {
+      project = await jsonSeedFor(id);
+      ws.projects[key] = project;
+      if (!ws.order.includes(key)) ws.order.push(key);
+    }
+    return mutator(project);
+  });
+}
+
+/** Mutate across projects — switching, creating, deleting, portfolio-wide edits. */
+export function mutateWorkspace<T>(mutator: (ws: Workspace) => T | Promise<T>): Promise<T> {
+  const run = queue.then(async () => {
+    const ws = migrate(await readStored());
+    const result = await mutator(ws);
+    await writeWorkspace(ws);
+    // Expire immediately (not stale-while-revalidate) so the re-render that
+    // follows every mutation sees the fresh data.
+    revalidateTag('db', { expire: 0 });
+    return result;
+  });
+  queue = run.catch(() => undefined);
+  return run;
+}

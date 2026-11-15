@@ -1,0 +1,217 @@
+import type { RollupNode } from './rollup';
+import type { ChangeLogEntry, ScheduleItem } from './types';
+
+/**
+ * What one person has to fill in for one week.
+ *
+ * The Update screen used to be a folder browser over all 285 rows: open a
+ * contract, drill to the item, fill it in, climb back out. With 89 activities
+ * under a single SPK that is a lot of navigating to find the handful of items
+ * that actually moved, and nothing on screen said which handful that was.
+ *
+ * SO THE QUEUE IS BUILT FROM THE SCHEDULE, NOT FROM PROGRESS. Measured on the
+ * Gundih data, the three candidate rules come out like this:
+ *
+ *     rule                                W20    W43    W60
+ *     scheduled this week                  12      3      3     ← this one
+ *     scheduled OR unfinished             133     28     28
+ *     scheduled OR overdue                 75     47     68
+ *
+ * "Unfinished" re-imports the problem the queue exists to solve: 133 of 176
+ * leaves sit part-done mid-project, so that rule asks someone to review almost
+ * the whole WBS every Friday. Scheduled-only averages 8.8 items a week across
+ * the project and never exceeds 25.
+ *
+ * Scheduled-this-week is the rule for what to ASK; it is not the rule for what
+ * is outstanding. A leaf that reached 100% early is scheduled for weeks it has
+ * nothing left to report on, so it arrives already answered (`complete`) rather
+ * than as work — see the field.
+ *
+ * The items it leaves out are not dropped — `stuck` collects everything whose
+ * scheduled finish has passed while it is still short of 100% (44 of them at
+ * W43). That is not a Friday to-do list, it is a project problem, so it
+ * surfaces as a warning pointing at the Review page rather than as work handed
+ * to whoever is filling in the week.
+ */
+
+/** A leaf the schedule says should be worked on this week. */
+export interface WorklistEntry {
+  node: RollupNode;
+  /** Ancestors outermost first, e.g. ['Pekerjaan Instalasi… (SPK-003)', 'Piping']. */
+  trail: string[];
+  /** Which week of its own span this is, and how long the span runs. */
+  weekOfSpan: number;
+  spanWeeks: number;
+  /** Plan percent minus actual percent for this leaf. Positive means behind. */
+  behindPct: number;
+  /** Someone recorded something against this leaf during this week. */
+  touched: boolean;
+  /**
+   * Already at 100%, with its scheduled finish still ahead of it.
+   *
+   * It counts as dealt with WITHOUT anyone touching it again: there is nothing
+   * left to record, and an item that finished early would otherwise be handed
+   * back every week until its span ran out — blocking the week each time over
+   * work that is done. `touched` stays honest so the two reasons can be told
+   * apart.
+   */
+  complete: boolean;
+}
+
+/**
+ * How many weeks ahead an unfinished activity's finish starts being called
+ * out: this week and the three after it. Asked for on 23 Sep 2026 ("2-3 week
+ * sblmnya") so an activity heading for a late finish is flagged while there is
+ * still time to act, not only once it has already missed. Widened by a week on
+ * 27 Sep 2026 so Data Overall's "ending soon" and the dashboard's Priority
+ * Actions (`lib/priority-actions.ts`, "the next three weeks") count the same
+ * finishes; they differed by the third week.
+ */
+export const DUE_SOON_WEEKS = 3;
+
+/** An unfinished leaf whose scheduled finish is this week or one of the next three. */
+export interface SoonEntry {
+  node: RollupNode;
+  finishWeek: number;
+  /** 0 when it finishes this week. */
+  weeksLeft: number;
+  pct: number;
+}
+
+/** A leaf whose scheduled finish has passed while it is still short of 100%. */
+export interface StuckEntry {
+  node: RollupNode;
+  finishWeek: number;
+  weeksLate: number;
+  pct: number;
+}
+
+export interface Worklist {
+  /** Scheduled this week, nothing recorded yet — the actual queue. */
+  due: WorklistEntry[];
+  /** Scheduled this week and already dealt with. */
+  done: WorklistEntry[];
+  /** Past its finish week and unfinished. Warned about, never queued. */
+  stuck: StuckEntry[];
+  /**
+   * Finishing within `DUE_SOON_WEEKS` and unfinished — the warning BEFORE
+   * `stuck`. Every unfinished leaf in that window is on it, on track or not:
+   * the decision was that nothing about to finish should be missed.
+   */
+  soon: SoonEntry[];
+  /**
+   * False when the project has no schedule at all. The screen has to say so
+   * rather than show an empty queue — "nothing to do this week" and "we don't
+   * know what is due" must not look the same.
+   */
+  hasSchedule: boolean;
+}
+
+/**
+ * Zero-weight leaves are milestone rows, not work — ON A PLAN WHOSE WEIGHTS
+ * SPEAK FOR THEMSELVES. See `ProjectInfo.weightsLocked`: unlocked, the same
+ * shape is work the money never reached, and hiding it takes real activities
+ * off every weekly surface with nothing on screen able to bring them back.
+ */
+function isMilestoneRow(n: RollupNode, weightsLocked: boolean): boolean {
+  return weightsLocked && n.children.length === 0 && n.bobot === 0;
+}
+
+/**
+ * Finished, to the two decimals every screen and every sheet prints.
+ *
+ * A quantity-driven leaf lands on 99.999999999 rather than 100 often enough
+ * that `>= 100` would keep asking for an item the whole app already shows as
+ * 100.00%.
+ */
+function isComplete(pct: number): boolean {
+  return pct >= 99.995;
+}
+
+/** The percent the plan expects this leaf to have reached by now. */
+function planPctOf(n: RollupNode): number {
+  return n.bobot > 0 ? (n.targetWF / n.bobot) * 100 : 0;
+}
+
+export function buildWorklist({
+  roots,
+  schedule,
+  week,
+  changeLog,
+  weightsLocked = true,
+}: {
+  roots: RollupNode[];
+  schedule: ScheduleItem[] | undefined;
+  week: number;
+  /** The whole log; this filters to the week itself. */
+  changeLog: ChangeLogEntry[] | undefined;
+  /** `db.project.weightsLocked`. Defaults to locked, which is today's behaviour. */
+  weightsLocked?: boolean;
+}): Worklist {
+  const byLeaf = new Map<string, ScheduleItem>();
+  for (const s of schedule ?? []) byLeaf.set(s.leafId, s);
+
+  const touchedIds = new Set(
+    (changeLog ?? []).filter((c) => c.week === week).map((c) => c.leafId)
+  );
+
+  const due: WorklistEntry[] = [];
+  const done: WorklistEntry[] = [];
+  const stuck: StuckEntry[] = [];
+  const soon: SoonEntry[] = [];
+
+  // The trail is collected on the way down so a card can say which contract it
+  // belongs to — without it the queue is a flat list of activity names, and
+  // "Piping Installation" appears under three different SPKs.
+  const visit = (node: RollupNode, trail: string[]) => {
+    if (node.children.length > 0) {
+      const next = [...trail, node.deskripsi];
+      node.children.forEach((c) => visit(c, next));
+      return;
+    }
+    if (isMilestoneRow(node, weightsLocked)) return;
+
+    const s = byLeaf.get(node.id);
+    if (!s) return;
+
+    const pct = node.curProgressPct;
+
+    const weeksLeft = s.finishWeek - week;
+    if (weeksLeft >= 0 && weeksLeft <= DUE_SOON_WEEKS && !isComplete(pct)) {
+      soon.push({ node, finishWeek: s.finishWeek, weeksLeft, pct });
+    }
+
+    if (s.startWeek <= week && s.finishWeek >= week) {
+      const entry: WorklistEntry = {
+        node,
+        trail,
+        weekOfSpan: week - s.startWeek + 1,
+        spanWeeks: s.finishWeek - s.startWeek + 1,
+        behindPct: planPctOf(node) - pct,
+        touched: touchedIds.has(node.id),
+        complete: isComplete(pct),
+      };
+      (entry.touched || entry.complete ? done : due).push(entry);
+      return;
+    }
+
+    if (s.finishWeek < week && !isComplete(pct)) {
+      stuck.push({ node, finishWeek: s.finishWeek, weeksLate: week - s.finishWeek, pct });
+    }
+  };
+
+  roots.forEach((r) => visit(r, []));
+
+  // Worst first, and "worst" has to be weighted: a leaf 40% behind carrying
+  // 0.03% of the project matters less than one 12% behind carrying 4%. Ties
+  // fall back to WBS order so the list is stable between renders.
+  const bySeverity = (a: WorklistEntry, b: WorklistEntry) =>
+    b.behindPct * b.node.bobot - a.behindPct * a.node.bobot || a.node.order - b.node.order;
+
+  due.sort(bySeverity);
+  done.sort(bySeverity);
+  stuck.sort((a, b) => b.weeksLate * b.node.bobot - a.weeksLate * a.node.bobot || a.node.order - b.node.order);
+  soon.sort((a, b) => a.weeksLeft - b.weeksLeft || a.node.order - b.node.order);
+
+  return { due, done, stuck, soon, hasSchedule: byLeaf.size > 0 };
+}

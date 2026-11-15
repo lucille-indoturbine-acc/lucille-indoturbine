@@ -1,0 +1,112 @@
+import { Suspense } from 'react';
+import SectionSkeleton from '@/components/ui/SectionSkeleton';
+
+import { RouteTransition } from '@/components/motion/RouteTransition';
+import { RegisterSetup } from '@/components/dokumen/RegisterSetup';
+import { SummaryScreen } from '@/components/dokumen/SummaryScreen';
+import {
+  getEngineeringBridge, getNumbering, getObstacles, getRegisterParties, getRegisterShape, getRegisterSummary, getRegisterTree, getWeekMovement,
+  getRegisterSources, getRegisterExisting, getRegisterSettings,
+} from '@/lib/register';
+import { getActiveProjectId } from '@/lib/projects';
+
+export const metadata = { title: 'EDL Summary' };
+
+
+/**
+ * The EDL, read as of the week in the address.
+ *
+ * Everything on it is counted, nothing is carried over: the total, what moved
+ * that week, the plan it is measured against and each discipline's deviation
+ * all come out of the dates in the register. The client's own summary keeps the
+ * same figures as pasted literals, which is why its "this week" column reads
+ * 0.70% while the real difference is 15.99%.
+ *
+ * The switch that points the WBS's engineering leaves at this register used to
+ * sit on this page. It is a setting, not a report, and it now lives in Project
+ * Settings — the seam band on the screen links to it.
+ */
+/**
+ * Behind a boundary because the open project is a cookie now, and a cookie is
+ * an uncached read (see lib/projects.ts). Prerendering this screen would mean
+ * baking one person's register into a page everyone is served.
+ */
+export default function EdlSummaryPage({ params }: { params: Promise<{ week: string }> }) {
+  return (
+    <Suspense fallback={<SectionSkeleton />}>
+      <EdlSummaryPageBody params={params} />
+    </Suspense>
+  );
+}
+
+async function EdlSummaryPageBody({ params }: { params: Promise<{ week: string }> }) {
+  const week = Number((await params).week);
+  // The open project comes from a cookie now, so this is a per-request read
+  // and cannot be baked into a shell. See lib/projects.ts.
+  const projectId = (await getActiveProjectId()) ?? '';
+  const shape = await getRegisterShape(projectId, 'edl');
+  const summary = shape.documents > 0 ? await getRegisterSummary(projectId, 'edl', week) : null;
+
+  if (!summary) {
+    const [parties, existing, settings, sources, numbering] = await Promise.all([
+      getRegisterParties(projectId),
+      getRegisterExisting(projectId, 'edl'),
+      getRegisterSettings(projectId, 'edl'),
+      getRegisterSources(projectId, 'edl'),
+      getNumbering(projectId, 'edl'),
+    ]);
+    return (
+      <RouteTransition id="dokumen-edl-summary">
+        <RegisterSetup
+          // Saved headings come back as fixed rows to keep adding into: the
+          // page only becomes the workbench once a document exists.
+          key={shape.categories}
+          existing={existing}
+          projectId={projectId}
+          register="edl"
+          clientName={parties.clientName}
+          contractorName={parties.contractorName}
+          hasDocuments={false}
+          settings={settings}
+          sources={sources}
+          numbering={numbering}
+        />
+      </RouteTransition>
+    );
+  }
+
+  const [tree, obstacles, movement, bridge, settings, parties] = await Promise.all([
+    getRegisterTree(projectId, 'edl', week),
+    getObstacles(projectId, 'edl', week),
+    getWeekMovement(projectId, 'edl', week),
+    getEngineeringBridge(projectId, week),
+    getRegisterSettings(projectId, 'edl'),
+    getRegisterParties(projectId),
+  ]);
+
+  // A card per HEADING, the level people choose in the builder (GENERAL,
+  // INSTRUMENT), with its sub-headings inside it. Only a band whose every part
+  // is itself split (an imported DETAIL ENGINEERING holding PROCESS, CIVIL...)
+  // opens into those parts, which is where an imported register keeps its
+  // disciplines. Splitting every heading put GENERAL's Execution Plan and
+  // Procedure on cards of their own (4 Oct 2026).
+  const groups = tree.flatMap((root) => (
+    root.children.length > 0 && root.children.every((c) => c.children.length > 0) ? root.children : [root]
+  ));
+
+  return (
+    <RouteTransition id="dokumen-edl-summary">
+    <SummaryScreen
+      summary={summary}
+      groups={groups}
+      obstacles={obstacles}
+      movement={movement}
+      bridge={bridge}
+      groupsTitle="By discipline"
+      settings={settings}
+      otherName={parties.clientName}
+      week={week}
+    />
+    </RouteTransition>
+  );
+}

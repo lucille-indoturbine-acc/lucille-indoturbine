@@ -1,0 +1,1480 @@
+<!-- BEGIN:nextjs-agent-rules -->
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
+<!-- END:nextjs-agent-rules -->
+
+# Reports & PDF
+
+Every report page in this app is one `.print-sheet-a4` element, and every report
+leaves the app as a **server-rendered PDF** — never `window.print()`. (Since 30 Sep / 3 Oct
+2026 the daily and the weekly report leave as the client's Excel workbooks instead; see
+their own sections. The rules below still bind the PDF routes and `/print/*`.) This is the
+feature users trust least, because every bug in it costs them paper, and it has
+regressed on real phones repeatedly. The rules below are the scar tissue. Read
+`app/globals.css` (the `.print-sheet-a4` block), `lib/pdf.ts` and
+`components/print/SavePdfButton.tsx` before touching any of it.
+
+**The report leaves as a PDF, not through the browser's print pipeline.** Browsers
+stamp their own band into printouts (date + title on top, URL + "1/9" on the
+bottom); it is a client print setting no CSS can remove, and iOS Safari has no
+toggle for it at all. `lib/pdf.ts` renders `/print/weekly/[week]?only=KEY` or
+`/print/daily/[date]` in headless Chromium (`puppeteer-core`;
+`@sparticuz/chromium` on Vercel, system Chrome locally) with
+`displayHeaderFooter: false`, so the file is just the report and identical on
+every device. `SavePdfButton` fetches the bytes and saves them via a blob anchor,
+narrating the whole trip (Save as PDF → Preparing PDF… → Downloading… N% →
+Saved! / tap-to-retry) — a bare navigation gave no feedback for the seconds
+Chromium needs, and users pressed the button twice. The percent needs the PDF
+routes' explicit `Content-Length`; the button also pings `/api/pdf/warmup` when
+it appears (and when the tab becomes visible again) so the Chromium boot —
+seconds on a cold Vercel lambda, the bulk of the mobile wait — happens before
+the tap, not after. The daily button persists unsaved edits first: the PDF is
+built from stored data.
+
+**The `/print/*` render targets live OUTSIDE the app segments, on purpose.** The
+weekly layout's `unstable_instant` validation covers every page beneath it and
+requires each searchParam a page reads to be enumerated in its samples — reading
+`?only=` under `/weekly/[week]/` failed the Vercel build, and a page-level
+`unstable_instant = false` does NOT exempt a page. Also: any uncached/dynamic
+read in these pages (searchParams, `connection()`) must sit behind `<Suspense>`
+or the build fails with "Uncached data was accessed outside of `<Suspense>`". A
+`null` fallback is safe — `lib/pdf.ts` waits for the `.print-sheet-a4` selector
+before snapshotting.
+
+**Geometry lives in CSS, never in a component.** `.print-sheet-a4` owns width,
+height, padding, margins and page breaks. A report component renders content and
+nothing else — no inline `width`/`height`/`padding`/`page-break`, no `mm` values.
+
+**`@page` margin is ZERO; the visible margin is the sheet's print padding**
+(10mm 15mm 12mm). Zero margin is also what keeps the browser band away if anyone
+manually Ctrl+P's a `/print/*` page — the band is drawn INTO the page margin, so
+no margin means no band (desktop/Android; iOS draws its own regardless, which is
+why the PDF flow exists).
+
+**So does the look.** All five reports are built from the report design system in
+`globals.css` (`.rpt-*`) plus `PrintHeader` / `PrintFooter` — nobody invents their
+own borders, greys, fonts or spacing. Two rules there are correctness, not taste:
+`print-color-adjust: exact` (without it renderers drop the header bands and zebra
+rows) and the embedded Inter webfont rather than a system stack (different OSes
+resolve system stacks to different faces, which shifts line breaks, column
+widths, and therefore where the report splits).
+
+**On paper a sheet must not assert a size.** A sheet that hard-codes
+`min-height: 294mm` overflows the printable area and spills a blank page after
+every real one — an iPhone printed 9 sheets as 18 pages (July 2026). On paper a
+sheet is a plain block: full width of the page box, exactly as tall as its
+content. The A4 look (210×297mm, drop shadow) is a screen-only affordance.
+
+**Never `break-inside: avoid` on a sheet.** A page-sized unbreakable box that
+doesn't fit gets shunted to a fresh page and blanks the one before it. Atomicity
+belongs on rows, images and charts.
+
+**Keep each sheet under ~240mm of content (~262mm with its print padding).**
+Taller splits onto a second page. Chunk instead of growing: `ROWS_PER_PAGE`
+(detail), `PAGE_SIZE` (photos), `WEEKS_PER_BLOCK` (S-curve figures). After ANY
+change to type size, padding or the header, re-measure every sheet — lay the page
+out at 794px (= the 210mm page box at margin 0) under `media: print`, because a
+wide viewport makes every sheet look shorter than it renders.
+
+**Paper must never paginate through a flexbox** — WebKit drops the fragments.
+Sheets and their wrappers are `display: block` on paper.
+
+**Verifying:** the artifact is the PDF, so test the PDF. Hit `/api/pdf/...` and
+assert the count of `/Type /Page` objects in the bytes (NOT `/Count`, which also
+appears on page-tree nodes) equals the sheets the report renders. Then click the
+real Save button ONCE, as soon as React has hydrated it, and assert the button
+walks Save as PDF → Preparing PDF… → Saved! and the file lands (CDP
+`Browser.setDownloadBehavior { behavior: 'allow' }` — `allowAndName` cancels blob
+downloads). And run `next build` before pushing: both build failures in this
+feature's history were build-time-only.
+
+# UI components (shadcn / Radix)
+
+shadcn is initialised here as `radix-nova` — Radix primitives, not Base UI. Radix
+was chosen over the lighter Base UI because this app is tested on iPhone first
+and Radix carries years of iOS Safari fixes; Base UI is newer and its edge cases
+are thinly documented. Components live in `components/ui/` and are OURS — edit
+them freely, there is no upstream to fight.
+
+**NEVER re-run `shadcn init`.** It is not additive. On an already-initialised
+project it rewrites theme files: in Aug 2026 it silently added Geist and pointed
+`--font-sans` at it, and overwrote `--background`/`--foreground` with its own
+oklch values. The font swap is the dangerous one — this repo's reports depend on
+Inter resolving identically everywhere, because a different face shifts line
+breaks and column widths and therefore where a report splits pages. Use
+`shadcn add <component>` to pull components (verified safe — it touches nothing
+but `components/ui/`), or `shadcn apply --only theme|font` for deliberate,
+scoped theme changes.
+
+**Radix per screen, never per row.** The cost is in mounted instances, not in
+the library. `WbsTreeTable` expands every parent by default and can render all
+285 leaves at once; a Radix Select / Popover / Tooltip inside that loop means
+285 contexts, refs, effects and portals. Inside any `.map()` that can exceed
+~20 rows, use native `<input>` / `<select>` and style them with shadcn classes.
+For a per-row action, mount ONE DropdownMenu and drive it with the active row's
+id. `DataOverallWorkbench` already sidesteps this by drilling one level at a
+time — keep that pattern.
+
+**Not every shadcn component costs anything.** Button, Input, Textarea, Table,
+Card, Badge, Skeleton, Alert and InputGroup are pure Tailwind — use them
+anywhere. Only Select, Dialog, Popover, DropdownMenu, Tooltip, Command, Sheet
+and Tabs pull Radix in.
+
+**`/print/*` stays Radix-free.** Print pages are plain HTML + the `.rpt-*`
+system. Puppeteer does not wait for animations, and a Radix portal renders
+outside `.print-sheet-a4` where the geometry rules do not reach.
+
+**Lazy-load the overlays.** Dialog, Command, Sheet and Popover load through
+`next/dynamic` so they stay out of the initial bundle — this is what the field
+crew's connection actually feels.
+
+**Do not replace the hand-rolled primitives.** `DateField`, `ConfirmDialog`,
+`AnimatedNumber` and `TruncatedName` have already absorbed rounds of mobile
+fixes (the calendar button is drawn by hand for a reason). shadcn is for what
+does not exist yet, not for re-doing what works.
+
+**One token source.** shadcn reads its colours from the existing `@theme inline`
+block in `app/globals.css` — never let it introduce a second palette. Its
+overlay animations are pinned to `--ease-ios` at the bottom of that file so a
+dialog opens on the same curve as everything else; keep that pin if the motion
+tokens ever change.
+
+# Setup, weights and the plan curve
+
+**Weight is derived, never typed.** `bobot = line value / project budget × 100`,
+computed in `lib/weights.ts` from priced rows. A BOQ exists on every EPC
+contract — it is what the bid was priced from — so asking for prices asks for a
+document people already have, the weights close at 100 by construction instead
+of by luck, and `contractValue` (and therefore earned value) falls out for free
+rather than needing its own field. Never accept a weight from a client payload:
+the weight is recomputed on every price and structure write
+(`lib/weights-auto.ts`). A project with no budgets weighs nothing — see below.
+(The db.json setup wizard and its `evenWeights()` were removed with Gundih on
+26 Sep 2026.)
+
+**A BUDGET IS THE ONLY THING THAT GIVES A ROW WEIGHT** (24 Sep 2026, replacing
+the 14 Sep "price or share" rule; spec in
+`docs/superpowers/specs/2026-09-24-weights-budget-only-design.md`). Weights
+gives every row ONE money box, and beside it the row's share of its POOL, which
+can be typed too: a typed share is turned into money on the client and the MONEY
+is saved, so `updateRowTextAction` takes a price and nothing else. The % / IDR
+toggle went because one row carried two percents that never agreed (the box's
+was a share of the parent, the figure beside it a share of the whole SPK).
+
+Four rules there are correctness. **A pool is the nearest heading above with a
+budget of its own, or the project** (`poolOf`); a work package with a budget
+is its own contract and draws on the project, which is how SPK-007 inside 1.4
+stays out of 1.4's sum. **The project budget IS its work packages added up**
+(`WeightResult.projectBudget`) and every weight is measured against it, so
+raising a package raises the project, UP TO THE CONTRACT VALUE (8 Oct 2026,
+replacing "only compared"): "if the work packages go past the contract, the
+contract has to be raised". `checkBudgetEdit` refuses an edit that takes the
+project past it, and `updateProjectFieldAction` refuses lowering the contract
+below the packages; both only where it gets WORSE. The refusal carries a
+"Raise the contract value" press to `/projects/<id>#edit=contractValue`, which
+opens Project details on that field, selected. **A row nobody budgeted weighs 0** — no even share of a
+remainder, anywhere, including a plan with no budgets at all. It was read as a
+figure somebody had typed ("= IDR 11 253" under five empty boxes), and the
+consequence is the user's by decision: the total reads what the budgets reach,
+and the strip at the top NAMES every activity with no budget, one press away.
+Since 26 Sep 2026 that total is also a GATE: no progress figure is shown
+anywhere until it closes (see "No figure until the weights close" below).
+**The cap is refused, in both directions, inside a heading**, by
+`checkBudgetEdit`: a budget may not take more than its heading has left, and a
+heading may not be lowered below what already draws on it. The project level
+is capped by the contract value (see above).
+
+**Every money issue is NAMED and one press from where it is fixed** (8 Oct
+2026). "1.34% has not reached an activity yet" beside an empty card sent the
+user opening card after card for the heading it meant (SPK-001, short by IDR
+789,900,000). `weightIssues` in `lib/weights.ts` is the one list: past the
+contract, headings over, headings short, activities with no budget (never
+milestones), contract not in any package. `loadWeightFixes` words it with an
+href; the dashboard and report gate ("What to fix"), Data Overall's guide and
+the Weights strip all read it, never their own. The project page shows the
+contract alone: the packages are held to it, so no "Matches the contract".
+Weights opens at `#row=<id>` (card open, row lit, scrolled clear of the sticky
+bar); its colours use the gate's `WEIGHT_TOLERANCE`, not 0.5, so 99.60% is
+never green while the reports hold their figures.
+It runs on the client while typing and again in the action before writing, and
+it refuses only what makes a pool WORSE, so Gundih's inherited 140% headings
+stay editable. Paste and indent are bulk and are not blocked; the card reports
+"over by X". **A stored `workstep_factor` is still READ** — as that fraction of
+the parent's own budget — so Gundih's IFR / IFA / AFC and every percent typed
+before 24 Sep keep their figures; nothing writes one any more, and setting or
+clearing a row's budget clears it. Zero in the money box is empty, never a
+stored 0. **Nothing changes a budget without being pressed first**: a row's
+figures are a button until pressed, then Save or Cancel (blur saves nothing),
+and a work package's budget opens a dialog that says what the new figure does
+(short or over against its rows, the project budget before and after, and
+whether that passes the contract value) before Save. And a budget is changed
+on Weights ONLY: since 25 Sep 2026 `ActivityPanel` shows the row's budget and
+weight as a tile that opens Weights (beside a Schedule tile that opens the
+planner), and has no money box of its own. Its foot has ONE button: Save saves
+a changed figure and records an unchanged one as "nothing moved this week";
+the separate "Nothing this week" button is gone.
+
+Stored `bobot` follows: `syncDerivedWeights` writes 0 on an unbudgeted leaf
+(a real zero, not a missing figure), a contract value edit re-syncs, and
+`resyncWeights` in `lib/db-snapshot.ts` brings a restored snapshot's unlocked
+projects in line once, keyed on `pragma user_version`, so the reports follow the
+rule without waiting for somebody to edit a price. Locked projects
+(`weight_basis = 'boq'`) never move.
+
+**A DOT IN A MONEY BOX IS A THOUSANDS SEPARATOR.** `stripAmount` reads every
+dot as one when every dot in the string is followed by exactly three digits, so
+`28.081` is twenty-eight thousand and `1.403.528` is the contract. This is an
+Indonesian contractor and that is how people here write a number; read as a
+decimal point it is not a rounding difference, it is three orders of magnitude.
+A price typed `28.081` against a US$1,403,528 contract stored 28.081 and printed
+"0.00% of project", so the row looked like it had never been filled in (14 Sep
+2026). Nothing could have caught it on screen either: `formatMoney` is pinned to
+`maximumFractionDigits: 0`, so THIS APP NEVER DISPLAYS A FRACTION OF A UNIT, and
+a box that takes what the rest of the app refuses to show can only lose
+information. The rule is all-or-nothing across the string, which is what leaves
+the importer's own figures alone — `5920000.006405` has six digits after its dot
+and `842723.7244800002` has ten. The percent box is NOT covered and must not be:
+a share is 0 to 100, so a dot there is a real decimal point.
+
+**A card's money is its ROWS added up, never the heading row's own price.** The
+first version printed `unitContractValue ?? price`, so a heading with six fully
+priced rows and no price of its own read "No value yet" beside a figure of
+69.72% — one card making two statements that contradicted each other, reported
+14 Sep 2026. `WeightsUnit.derivedValue` is the figure that was missing, and
+`decidedRows` counts rows set EITHER way, because a count of priced rows reads
+as nothing done on a heading whose rows are all shares.
+
+**The plan curve is generated, never imported.** `generatePlanCurve` turns
+start/finish/pattern into each leaf's weekly `targetWF`, which is exactly the
+shape `LeafSnapshot` already stores — so a schedule revision regenerates the
+curve instead of sending someone back to Excel. `scurve` is a smoothstep, not a
+logistic, so an item lands on exactly 1.0 at its finish week; a curve that
+asymptotes leaves every item at 99.x% forever and leaks a permanent phantom
+deviation into the project total.
+
+**The week grid is the project's dates read a second way, and it follows them.**
+`weekRowsFor` in `lib/week-grid.ts` cuts seven-day blocks from the start date
+and clips the last one at the finish. It used to run ONCE, at creation, and
+editing the start date afterwards only wrote the column — so PHSS Samberah,
+whose start was typed 26 Dec 25 against a plan whose weeks run from Monday
+29 Dec, had every week end three days early for its whole life, with nothing on
+any screen able to move it. It cost 0.24 points of plan on week 36 and
+something on every week. `relayWeeks` re-lays the grid on any date edit,
+matching weeks by NUMBER so week 36 stays week 36 and keeps everything recorded
+against it. **A surplus week is only dropped if nothing was ever recorded
+against it** — `leaf_progress`, `milestone_progress` and `approvals` all cascade
+from `weeks`, and shortening a project is not a reason to destroy a signed
+approval.
+
+**`weekAnchorEndDate` is WEEK ONE'S END**, because every reader computes
+`anchor + (n - 1) weeks` from it. `lib/dashboard-db.ts` handed over the LAST
+week's end instead, so every period label in the app and on all five printed
+sheets sat (weeks - 1) weeks in the future: a 72-week project showed week 36 as
+"08 Jan – 14 Jan 2028" where the client's own signed report says 31 Aug –
+06 Sep 2026. The figures were never affected — `targetWF` reads each week row's
+own `endDate` — which is exactly why it survived so long. db.json has always
+stored week 1's end here (Gundih's `2025-10-30` is `weeks[0].periodEnd`), and
+that agreement is what keeps the two stores printing the same header.
+
+**A project's INITIAL is three letters, and it is stored in `projects.alias`.**
+`deriveInitial` in `lib/initial.ts` guesses it from the name: initials of the
+first three significant words, or for a one- or two-word name its first letter
+plus the last two consonants, which is what makes "Gundih" into "GDH". The cap
+is enforced in `createProjectAction` as well as on the input, because
+`maxLength` is a courtesy to whoever is typing and not a rule. The column keeps
+the name `alias` deliberately: renaming it would mean a second migration
+through the snapshot-restore path for a word, and `drizzle-kit` has eaten child
+rows here before when it chose to rebuild a table rather than alter it. The
+first version of this allowed twelve characters and produced "JPICSPUCS", which
+is not a handle but an unpronounceable second name; three is the length people
+write by hand.
+
+**Every column the project page shows must be in `ProjectField`, or it is
+write-once.** The initial shipped reachable only from `createProjectAction`,
+which meant a typo was permanent and the three projects predating the column
+could never be given one. `ProjectField` and the `FIELDS` list in
+`ProjectDetails` are the pair to check: the same audit found
+`documentNoWeekly` and `documentNoDaily` had been READ into the printed report
+header since the importer wrote them and had no way in either. Still
+unreachable and deliberately so: `weightBasis`, which belongs to Data Overall.
+
+**The signature blocks were printing the wrong company on the wrong side.**
+`lib/dashboard-db.ts` built them from `contractorName` and `clientName` instead
+of from `signature_left` / `signature_right`, which dropped the signatory's name
+entirely and put the contractor where the client belongs: the imported project's
+own signed reports print the CLIENT on the left (PT PERTAMINA EP ZONA 11 /
+Andika Wijaya Kusumah) and the contractor on the right. Both columns were
+populated by the importer all along, so the right values were sitting there
+being ignored. They are read properly now, through `lib/signature.ts` — the one
+module that knows the JSON shape, because a `'use server'` file cannot export
+the sync reader — and the four halves are editable in Project details. The
+fallback keeps the old shape for a project whose columns really are empty, with
+the sides the right way round. Gundih on the SQLite path now prints byte for
+byte what db.json prints, which is what makes moving it later a migration
+rather than a change of number.
+
+**Every project's report header comes from these columns.** The one exception
+was the imported project, which read its header from db.json and had a warning
+in Project details saying so; both went with it on 26 Sep 2026.
+
+**The planner asks for a schedule, and nothing else.** Four columns: task name,
+duration, start, finish. Target, Price and Weight were removed on 12 Sep 2026
+and the reason is not tidiness. With per-row money out of it, the sheet's
+client-side model only has to hold name, dates, duration, order and depth,
+which is what makes instant editing tractable at all; with Price in it, that
+model would also have to carry weight derivation. Per-row prices, weights and
+the `weight_basis = 'boq'` lock live in Data Overall (board item 12), and until
+it exists a project made in the app cannot be marked value-based and takes
+`evenWeights()`. `ValueStrip` keeps the contract figure and the currency,
+because that is one number belonging to the project and it is asked when the
+project is created. The pricing bar went with the columns rather than staying
+behind: with no price to type it would have read 0% forever with nothing on
+screen able to move it, and a number that cannot be acted on reads as broken
+rather than as empty. Nothing is deleted underneath — `targetDate`, `price` and
+`bobot` are still stored, still written by the importer and by
+paste-from-Excel, and their actions are untouched.
+
+**The phone keeps THREE of those four columns, and that is measured.** `GRID_SM`
+has five tracks against `GRID_LG`'s six, and `scripts/verify-sheet-columns.ts`
+asserts both numbers. All four DO fit below 640px once the money columns are
+gone — six tracks come to 370px, clearing even a 375px iPhone SE — and fitting
+was the wrong test: on Gundih at 390px the name column went from 170px to
+100px, "Relokasi 2 Unit Ta…" became "Relok…", and three branches read "D…",
+"G.." and "I.". The start date is one tap away in the row panel; the column you
+identify a row by is not. Re-measure the name column, not just the overflow,
+before adding anything to that grid.
+
+**Data Overall is ONE MAP, and it is not a table.** Two earlier cuts were built
+outward from the workbook — its columns, its blocks, its formulas — and both
+were rejected the same day for reading as a spreadsheet with the gridlines taken
+out. The figures were never wrong; the shape was. What shipped on 13 Sep 2026 is
+`components/weekly/OverallMap.tsx` over `lib/overall-map.ts`: contract → group →
+activity, opened where you stand, NO COLUMN HEADERS ANYWHERE, and three things
+per row — name, one bar, one number. Everything else about a row is one press
+away in `ActivityPanel`, which is also where Weights went: **price, method
+and schedule stopped being a screen**, because three screens meant remembering
+which one held which field. `/weekly/[week]/weights` survives as the BULK tool
+(two hundred prices in one sitting is not a per-row job), and on 14 Sep 2026 it
+came BACK into the week bar as an unnumbered entry called Weights. The old
+rule here said not to put it beside the stepper, and the half of it that still
+holds is that it is not a STEP: what an activity is worth belongs to the project
+and is as true in week 4 as in week 40, so it sits LAST in the bar. (Since 25 Sep
+2026 the bar is plain labels on a white ground with the sidebar's blue active pill, from a
+reference he chose; no entry has a numeral any more, and the week picker with
+its Current badge / Set as current button is a row of its own above it.) The half that was wrong is that a
+setup card and a quiet link under the map were enough to find it by; they were
+not. It is also the only screen that can show a heading's budget against what
+its rows have claimed, which no per-row panel can.
+The weekly queue survives too, as a LENS over the map rather than a list of its
+own: `lib/worklist.ts` still decides what is due.
+
+Four things there are correctness, not taste. `buildOverallMap` COMPUTES
+NOTHING — percentages come from `lib/rollup.ts`, due/filled from
+`lib/worklist.ts`, method from `lib/progress.ts`; a screen with its own opinion
+is how a report ends up disagreeing with the site. A SINGLE ROOT IS UNWRAPPED,
+because Gundih's WBS has one top row and the map's first screen was otherwise
+one line reading "176 activities". `withOptimistic` carries a saved leaf up its
+ancestors by WEIGHT using the rollup's own formula — it is display only, lasts
+until the refresh lands, and is the reason a contract bar visibly grows when you
+fill something in, which is the only part of this screen that makes filling in
+nine items feel like progress rather than a chore. And the panel's draft is
+RE-SEEDED when the row's method changes: switching to quantity makes the server
+seed a quantity from the old percent, and a draft still holding `qtyDone: 0`
+would have made Save write a zero over it.
+
+**Adding a weekly tab means setting `printable`.** `TABS` in
+`components/weekly/WeekTabs.tsx` carries an explicit flag that must match the
+`ReportKey` union in `app/print/weekly/[week]/page.tsx`. It used to be inferred
+by excluding `overall`; adding Panel Kendali under that rule pointed the PDF
+button at `?only=control`, which renders no sheet — and `lib/pdf.ts` waits for
+`.print-sheet-a4`, so the request hangs rather than failing. Set the flag
+deliberately.
+
+**Links are made in Projects and checked, never scheduled** (7 Oct 2026, spec
+`docs/superpowers/specs/2026-10-07-projects-links-gantt-design.md`, plan
+`docs/superpowers/plans/2026-10-07-projects-links-gantt.md`). Three ways
+(after it finishes / after it starts / finishes after it finishes) with a wait
+of 0+ days, stored as `{id, type, wait}` in `wbs_nodes.waits_for` on the row
+that waits; a bare string id from before reads as FS + 0 (`lib/links.ts`).
+`analyseNetwork` in `lib/chains.ts` is the one reading: `getSheet`,
+`validateWeek`, the Gantt and the Links panel all call it, and the forecast
+pushes by the same way and wait. Plan dates stay typed; a link the plan
+breaks is offered a move (later only, by exactly the overrun) and, declined,
+stays red, in the strip over the planner and in Check. "Can slip" shows only
+for rows linked through to the finish: the old rule gave every unlinked row
+float to the project end. The screen never says FS/SS/FF, lag, float or
+critical. `lib/links-sqlite.ts` is the only writer and `pruneLinks` runs in
+both `renumber()` copies. "Lock as contract" copies the plan once into a
+`contractual` baseline; nothing in the app unlocks it. Data Overall only reads
+links since 11287f1.
+
+**Bars read the plan, and the kind of work is the plan's** (7 Oct 2026, spec
+`docs/superpowers/specs/2026-10-07-projects-bars-and-kinds-design.md`, plan
+`docs/superpowers/plans/2026-10-07-projects-bars-and-kinds.md`). P6's twelve bar
+types became ONE bar and four marks: the bar is the plan's dates cut into its
+kind's stages (each as wide as its weight, so the solid length IS done), and
+Done / Forecast (red hatch + "+N d") / Contract / Can slip are switched on or
+off in the Bars panel, which is its own toolbar button beside Links. GROUND
+RULES (agreed the same evening): a project has a FIELD (`projects.field`,
+`lib/fields.ts`, EPC only for now) and the kinds of work come from it; the Bars
+menu is identical in every project and hides nothing (an option with nothing
+behind it says so); what colour MEANS is the user's: Kind of work, Package, My
+labels (their own names and colours, a row's in `wbs_nodes.bar_label`, a
+heading's paints the rows under it without one) or One colour, which is where
+a new project starts. Every shape and mark is explained in "What the bars
+mean", in short plain words. Headings stay black. Link arrows always show,
+nothing fades when a bar is pressed; Links is a switch in the menu. Swatches
+come from twelve tokens (`--plan-1..10`, black, grey), laid out six to a row
+so the grid closes two full rows edge to edge (8 Oct 2026: eight left a lone
+swatch and a gap); red, amber and yellow are never offered (the forecast's and
+the target's). Packages still default to `--plan-1..6`. It is ONE JSON column,
+`projects.bar_view` (`lib/bar-view.ts`); the rule editor, `lib/bar-styles.ts`
+and the presets are gone, `bar_styles` and `bar_preset` stay in the schema
+unread. Done and Forecast come from `lib/bar-facts.ts`, which reads the same
+Database, progress and forecast as Data Overall, as of the current week, so the
+planner cannot disagree with it (`verify-bar-facts`). A pressed bar says its
+plan, done, finish and WHY in the selected-row strip (`lib/bar-sentence.ts`);
+that strip and the legend share `md:min-h-13` (52px, the height of the bands above them), or selecting a row shifts the
+list between a press's mousedown and its click. Stage NAMES are written only
+on the pressed bar (on every bar they buried the late hatch; he agreed). Links
+in the toolbar is pressable for any selected row; on a heading the press says
+"Links join activities, not headings" (disabled, it read as broken). THE KIND OF WORK IS SET IN THE
+PLAN ONLY: the row panel's kind view (`KindView`, the same `WorkKindPicker`);
+a heading hands it to rows with no kind or still carrying its previous one
+(`lib/kind-plan.ts`, `reachOf` in `lib/kind-reach.ts` counts what the panel
+says it will touch); a new row takes its heading's kind. Before Save the view
+says, in project points, what recorded progress becomes. Data Overall shows
+the kind and links to `#row=<id>&open=kind`; it never asks the kind.
+THE PLAN ASKS ONLY THE KIND; THE DETAIL IS ASKED IN DATA OVERALL (8 Oct 2026).
+Asked in the plan, which part of construction it is went to Other on every
+row, because the planner does not know yet. So Construction from the plan is
+written with no stages, as a typed percent that keeps whatever was recorded
+(`writeUnanswered` in `lib/kind-plan.ts`), and never with a part: not from the
+client's steps, not from a sibling. THE PART IS ITS OWN COLUMN,
+`wbs_nodes.work_part` (null = nobody said), never read off the rungs: the
+generic construction ladder every row got by default IS Other's ladder, so a
+row nobody answered read "Construction · Other" in the planner and opened on
+Other in Data Overall (he rejected both, 8 Oct 2026). The planner shows the kind
+only. Data Overall's panel shows "Which part of construction?"
+(`DisciplineTiles`) while `work_part` is null, nothing pre-chosen; a pick shows
+its stages at once with the figure restated into them (never raised), and the
+panel's one Save writes stages and part through `setWorkKindAction`. Picking
+the ladder a row already climbs (Other on the generic one) only records the
+answer: `setWorkKindSqlite` leaves the rungs and their ticks alone. An answered
+row reads "Part of construction" with Change. Any detail question a kind gains
+later belongs there too, not in the plan.
+
+**A method or kind change must touch ONLY that row's ticks.**
+`setProgressMethodSqlite` deleted `milestone_progress` by WEEK id from
+12 Sep to 7 Oct 2026 (1aa90ad to 9160816), so changing one activity's kind wiped
+every activity's ticks in those weeks: on the demo, 66.01% actual became 17.82%
+(4,656 ticks to 188). `verify-kind-plan` now counts every other row's ticks.
+Data Overall's old kind Change went through the same path, so a deployed
+project whose kind was changed in that window may have lost ticks.
+
+**React Compiler is on, so the Projects screens keep refs out of render.** A
+ref touched inside a `.map()` callback, or in an inline function called while
+rendering, makes the compiler give up on the whole component (lint
+`react-hooks/refs`). The Gantt's drag handles carry `data-*` and one delegated
+`onPointerDown` starts a drag; its line moves through refs in
+`requestAnimationFrame`, never React state. Overlays that must open instantly
+(Links panel, drag card) are warmed when idle and rendered without suspending
+(`components/projects/links-panel-loader.ts`): `next/dynamic` suspends once
+even from cache, and React 19 throttles the reveal (~300 ms). Every change to
+this page is measured A/B against a baseline build with
+`scripts/verify-projects-perf.mjs`; this machine's load moves the numbers more
+than the code does, so never compare against a figure taken at another time.
+
+**The planner's two scrollers are OPAQUE, and nothing hovers while they move**
+(19 Oct 2026, "berat sekali, g smooth"). Below 1.5x pixel density (Windows at
+100-125%, this machine) Chrome only scrolls an overflow box on the GPU if its
+background is opaque; the panes were transparent, so every frame of a wheel
+scroll repainted the planner on the main thread. `bg-card` on both panes is
+that fix, not a colour. And while either pane scrolls, `data-scrolling` on the
+shell turns off pointer events inside them (150 ms after the last scroll it
+clears): a row sliding under a still cursor lit up every 44px, and that repaint
+held the mirror back. Measured at DPR 1.25: wheel to screen 75 ms to 28 ms on
+the sheet, 81 to 43 on the Gantt. A phone (DPR 2-3) was already composited and
+did not change. Never trace with `invalidationTracking` when timing: it
+inflates every DOM commit tenfold and invents long tasks.
+
+**A style rule can make every scroll re-style the whole page** (12 Nov 2026,
+"masih berat bgt", a Mac at DPR 2). Two rules did, found with the trace's
+`UpdateLayoutTree` element counts. `body:has(...[style*="display: none"])`
+(the login's "hide the chrome") re-checked on every DOM insert and every inline
+style change anywhere, so each windowing step of the planner re-styled ~2,600
+elements; the chrome now hides on `html[data-bare]` (`useBareScreen`,
+`BARE_SCRIPT`). And `[data-scrolling] .pane > *` had `*` on the right, so
+toggling `data-scrolling` invalidated the whole planner, and `pointer-events`
+is inherited, so it re-styled all ~1,000 elements under it anyway: the hover
+block is now ONE transparent `ScrollShield` per pane, shown while scrolling.
+Measured on Merbau at DPR 2, 4x CPU, 50 wheel steps: style 2,050 ms to ~210;
+on 30 rows 300 ms to 10. Rules: no `:has()` on `html`/`body`, no `*` as the
+rightmost part of a selector keyed on a toggled attribute, never toggle an
+inherited property on a big subtree. And build into a dist dir `.gitignore`
+covers (`.next-preview*`): Tailwind scans every file git does not ignore, so a
+build left in `.next-perf/` fed its old classes back into the next build's CSS.
+
+# No figure until the weights close, and every figure adds up
+
+Decided 26 Sep 2026 from a card-by-card breakdown of the dashboard against
+week 36 of the deployed project, whose weights totalled 70.79%. The same week
+read 51.09 / 34.98 / +16.11 on the dashboard and 51.09 / 24.76 / 11.40 on Data
+Overall, because `computeGrandTotal` gave ACTUAL as a share of the total weight
+and PLAN and VARIANCE as raw weight points. Spec:
+`docs/superpowers/specs/2026-09-26-dashboard-truth-design.md`. Proof:
+`scripts/verify-dashboard-figures.ts`.
+
+**The weight gate** (`lib/weight-gate.ts`): figures appear only when leaf
+weights total 100 (±0.01, the `validateWeek` tolerance) AND no non-milestone
+leaf weighs 0 — a finished activity with no budget counts for nothing, so a
+total can close and still be wrong. Until then the dashboard, Summary, Detail,
+S-Curve, Data Overall's four figures, the weekly PDF (one "figures held" sheet,
+never an empty page), the sidebar card and the Save PDF button all hold back.
+FILLING IN IS NEVER GATED: site facts are recorded regardless and every figure
+appears from them once the weights close. Check carries the same rule as an
+error. No exemption for a locked BOQ: Gundih, the only one, is being removed.
+
+**One scale.** Read `GrandTotal.planPct` / `deviationPct`, never `targetWF` /
+`variance`, for anything a person sees; section and item shares are divided by
+the total weight too. The S-curve's plan point is `planPct`.
+
+**A figure you can recompute on screen must recompute** (`lib/figures.ts`).
+Differences are taken between ROUNDED figures (`shownDiff`): deviation, SPI,
+added this week, lead change, look-ahead gaps. Parts explaining a printed total
+are apportioned by largest remainder (`apportion`): By section, the items in
+"Why the project sits here" (both ways: what holds it back when behind, what
+carries the lead when ahead), Work spread, What moved. Detail prints one
+decimal, so it subtracts at one decimal. People check this app with a
+calculator; 40.71 − 34.44 printed as 6.26 read as a bug.
+
+**Money beside a percentage is priced against the project budget**
+(`ProjectInfo.projectBudget`), the denominator of every weight, not the typed
+contract value.
+
+**Plan is a bar, not a tick** (`components/ui/PlanActualBar.tsx`, `PlanBar`,
+`OverallMap` `Bar`, `WeekLog`). Blue actual over a thin red plan bar on one
+scale. The tick at a 0% plan sat on the bar's start and read as a stray mark.
+
+**The dashboard tells the week.** Work spread carries a Week N block (added vs
+plan added, lead change, what moved with before → after) and "+N this week" on
+its key; the block stretches to the card's foot so the row shares both edges.
+
+**Priority Actions names ACTIVITIES, not a project percentage** (27 Sep 2026,
+`lib/priority-actions.ts`, proof `scripts/verify-priority-actions.ts`). It
+replaced "What is urgent" (data-quality warnings that read the same every week)
+and "What has to happen next" (the project total against the next two weeks'
+plan, which read "Reached" twice on a project ahead of plan). The window is the
+three weeks after the viewed one. P1: late, or finishing in the window while
+behind plan now. P2: finishing in the window on plan, or running and at least a
+point behind. P3: starting in the window. Running on plan is ordinary work and
+stays OFF the list; that exclusion is what keeps it a priority list and not the
+WBS. Late and finishing are the worklist's `stuck` and `soon`, so the worklist's
+due-soon window was widened to this week plus three to match: Data Overall's
+"ending soon" and this card count the same finishes. The week's checks are one
+pill to Control; the full list of findings lives there. The row pill reads
+the REASON as in the chosen variant ("Late 2 w", "Finish W38", "Catch up",
+"Start W39") and its COLOUR is the priority: red P1, amber P2, blue P3, every
+pill one fixed size. Printing "P1" in the pill was built and rejected the
+same day. Since 28 Sep 2026 a fifth ground, checked LAST so it never
+relabels a row: "Slips N w", an activity the FORECAST finishes a week or
+more past its plan on evidence (a vendor, site or client date, a measured
+rate, or a late activity it waits for), P1 if it sets the project finish,
+P2 otherwise, and the only ground that reaches past the window. Plan dates
+alone never make a slip (`ForecastSummary.slipping`).
+
+**Data Overall keeps only what somebody has to answer about the forecast**
+(28 Sep 2026). The forecast is the dashboard's. Over the map there is no
+forecast strip: "will slip" and "to check" sit beside "late" and "ending
+soon" as reminder buttons. "Will slip"
+and "Slips N w" both read `slippingOf` in `lib/forecast-read.ts`, so the two
+screens name the same rows. "To check" lists only findings the panel can
+answer (kind vs heading, material ticked before delivery, the path without a
+date); a repeated ladder and typed-vs-ticks are still found but not listed
+until a history-safe restatement exists. The panel shows the forecast card,
+the next stage's date, and "What has to finish before this one?", and no
+warning boxes. LINKS ARE THE PLANNER'S, one activity at a time: EPC order
+only suggests. A one-press "Link" for the whole plan was shipped and removed
+the same day, because once it had run nothing on screen showed what it did.
+Since 7 Oct 2026 relations are MADE IN PROJECTS, with the plan, and Data
+Overall only reads them: the panel lists what an activity waits for only when
+it waits for something, with no button. The picker and "Use these" left it;
+`setWaitsForAction` stays for the planner to call.
+
+# Daily reports: today opens as yesterday
+
+Decided 30 Sep 2026; spec `docs/superpowers/specs/2026-09-30-daily-report-screen-design.md`,
+plan `docs/superpowers/plans/2026-09-30-daily-report-screen.md`. A daily report is
+about 90% the same as the day before, and the field engineer who owns it will not
+retype it, so `applyCreateDaily` opens each day as yesterday already filled in and
+a person only corrects what differs. Carried: the crew at their hours
+(`ManHourRow.hoursEach`, and `todayHours = pobQty × hoursEach`, the workbook's own
+formula), previous hours grown by yesterday's, the permits still OPEN, and
+yesterday's "tomorrow" list as today's unticked list. Weather, photos, the log and
+every confirmation start empty on purpose.
+
+**Section states live in ONE function** (`sectionStates` in `lib/daily-status.ts`):
+the header's segments, every row's mark and `scripts/verify-daily-carry.ts` read it,
+so they cannot disagree. Nothing is `ready` until a person said so, except what they
+entered and what the app derives. A report written before the screen has no
+`confirmed` and counts its crew, permits, HSE and activities as confirmed.
+
+**The screen is rows, not the form** (redesigned 30 Sep 2026 after the first cut was
+called "too Excel"). Seven parts in three cards (On site: weather, man hours; Work:
+daily activities, photos; Safety: HSE, permit, area of concern), each a hairline row
+with a status mark, one line of summary and at most one or two quiet actions, opening
+into its own editor (`components/daily/sections/*`, built on `SectionRow`, `Marker`,
+`Panel`). ONE part is open at a time. Nothing on the screen mirrors the workbook's
+grid: the export does that, and the "Excel sheet holds N" note speaks ONLY when a
+list is over what the sheet can hold (`CapacityNote`). **The panel is height + opacity
+from `Panel.tsx`, with `contain: layout paint`;** measured under 4x CPU throttle it
+draws a frame every 17-33 ms open and close at 390 and 1440, so keep it that way
+(`AnimatePresence initial={false}`, one ease, no per-row layout animation).
+
+**Tomorrow is the plan, and the next report shows it as Today, whichever day was made
+first** (1 Oct 2026). Carrying it only at creation failed in use: the 25th had been made
+before the 24th's plan was typed, so the plan never reached it. `withPlan` /
+`planInto` (`lib/daily-items.ts`) fold the day before's Tomorrow into Today on EVERY read
+(the report page's `initial`) and EVERY write (`applyPatchDaily` pulls into the day it
+writes, and pushes a changed Tomorrow into the next report if it exists). Planned items
+are `fromPlan`: they follow the plan until ticked (a ticked one is a fact and stays) or
+reworded; one the person removes goes into `declinedPlan` so the plan never puts it back.
+Deterministic ids (`plan-<text>`), so a merge run twice changes nothing. The done set is
+never touched, so the Excel "what was done" block cannot change behind anyone's back. No
+suggestions: a list of yesterday's sentences with Add and dismiss was built and rejected
+the same day. It reads the day BEFORE, never a later report.
+
+**Work has no Confirm and no standing warning** (`activitiesDone` in
+`lib/daily-status.ts`): ready when something is TICKED today and tomorrow has a plan,
+otherwise just not ready yet (the grey mark). The ONE warning is pressing Add (or Enter)
+on an empty box: that box turns red, says to type first, takes the cursor, and clears as
+soon as anything is typed. Warnings shown before anyone had done anything (amber lines
+under both boxes, an amber row) were shipped and rejected the same day.
+
+**Save changes finishes a report**: it retries a failed batch, waits for every write
+(`flush`), then goes back to the list, beside Export Excel at the same size, solid where
+that one is outline. **The New Daily Report dialog closes in the same transition as its
+navigation.** It used to close from an effect, but the router keeps `/daily` hidden
+(`display: none`) behind the report and a hidden tree runs no effects, so the dialog stayed
+open behind the report and came back on Back (measured: its DOM was on the report page).
+
+**There is no progress on the daily screen, the list, or the Excel export.** It is the
+weekly report's job. Since 30 Sep 2026 the export leaves the sheet's "6. Progress Summary"
+out too (see below); `lib/daily-progress.ts` stays only for the unlinked daily print page,
+and `DailyReport.planPct` / `actualPct` are no longer written. `DailySectionKey` has no
+`'progress'`; do not add one back.
+
+**Photos: picked several at once, uploaded one at a time, and the route is warmed first.**
+`PhotoUploadGrid` has ONE `multiple` file input; a pick fills the empty slots from the
+pressed one on (adding the pages it needs in one `PATCH { pages }`), compresses one photo
+at a time (six 12 MP decodes at once is how an iPhone tab dies) and puts every write
+(upload, remove, page) through one queue, because each route rewrites the whole record and
+two instances writing at once drop a photo. The route is pinged (`GET`, 204) when the grid
+appears, when the tab comes back and when Add is pressed: on 30 Sep 2026 the photo route
+was a cold function every time and made two small uploads wait 4.6 s and 2.7 s before the
+handler read a byte. The daily grid does NOT `refreshDbAction()` (the screen owns its copy),
+and Export Excel waits for `whenPhotosSaved` as well as `flush`.
+
+**Autosave, with no Save button.** `useDailyReport` keeps the optimistic copy, one
+write is in flight at a time and whatever changes meanwhile merges into the next
+write; `patchDailyAction` does NOT `refresh()`. Back and Save PDF wait for the queue
+(`flush`) and `beforeunload` guards while anything is unsaved: the first press test
+reloaded before the queue drained and lost four changes, which is what a person
+closing the tab would have done too. The "Today so far" log records what a person
+DID (a tap, an addition), never totals; photos join it by their `photoMeta` time.
+A writer that only knows the two activity strings (the PATCH route, and the Excel
+import to come) is not shadowed by stored items: `applyPatchDaily` drops the items
+when only the text is patched.
+
+## The daily report leaves as the client's own Excel workbook
+
+Slice 2a, 30 Sep 2026; spec `docs/superpowers/specs/2026-09-30-daily-excel-export-design.md`.
+The daily report is exported as `PRGG-00-G0-RPT-003_DAILY PROGRESS REPORT`, exactly, and
+NOT as a PDF (the daily PDF button became "Export Excel"; the old route, print page and
+component are unlinked but still there). The six photos went in on 30 Sep 2026; logos and
+signatures are still slice 2b, and import is slice 3.
+
+**The export departs from the client's form in exactly one place, on purpose.** "6.
+Progress Summary" (rows 46-56) is HIDDEN, not deleted, so no row, merge, formula or print
+break below it moves; its cells are left empty (the deviation formula caches 0) and "7.
+Progress Photograph" is written as "6." so the numbering does not jump.
+
+**Every photo goes in, six to a page, left then right** (`CELLS.photos`: C71:K90, L71:R90,
+..., L113:R132; rows 91, 112 and 133 between them are captions), in slot order with the
+empty slots skipped. Past six, `addPhotoPages` copies the form's photo page (rows 67-134,
+the page after the break at 66) below itself for every six more: rows with their styles,
+heights and frame, their merges, a page break before each copy, the used range, and the
+print area in `workbook.xml`. The sheet prints at a fixed scale 45% (no fit-to-page) and
+repeats rows 2-9 on every page, so a copy is a real extra page with the form's header.
+`lib/xlsx/daily-photos.ts` adds a media part, a relationship and a `twoCellAnchor` per
+photo to the template's `drawing1.xml`, which until then held only the four checkboxes
+(its root declares no `r:`, so the export adds it). A photo FILLS its box less an 18 px
+margin (3 px read as jammed against the lines), the crop being `a:srcRect` so the whole
+image stays in the file. The anchor stretches the picture to the box as Excel really
+draws it, and a column is not one width: on this template the box is 2.4% wider on screen
+than the 96-dpi formula and 6.6% wider printed to PDF, so the crop aims between the two
+(`WIDTH_SPREAD`). Cropped for the formula alone, every printed photo came out 7% too wide.
+
+**Never write it through ExcelJS.** A read then write of the sample lost the four weather
+checkboxes (form controls), the VML drawing and the printer settings, and turned 5,533
+defined names into 486. The export PATCHES the package: `lib/xlsx/sheet-xml.ts` finds a
+row or a cell in `sheet1.xml` and re-emits only what was edited, so every byte not
+written to (merges, styles, widths, conditional formats, page setup, checkboxes) is the
+client's. The template (`lib/xlsx/daily-template.ts`, generated by
+`scripts/build-daily-template.ts` from the 07 Mar 2026 workbook) is that workbook with one
+day's data taken out; it keeps its 111 external links and dead names on purpose, because
+without Excel on the development machine a trimmed package cannot be proved to open
+cleanly, and it has NO `calcChain` (Excel treats a chain entry with no formula behind it
+as damage, and an export clears formulas in unused rows). The template is an array joined
+at load: thousands of `'...' +` operands overflow the stack of node's TypeScript stripper.
+
+Measured across 360 real workbooks: 348 share one layout and nobody has ever inserted a
+row, so the sheet is a fixed-capacity form (`CAPACITY` in `lib/xlsx/daily-cells.ts`, the
+one place the cell map lives). More than fits: text lists show the first N-1 and
+"+N lagi (lihat app)"; numeric tables (crew, non effective, HSE) fold the overflow into
+"Lainnya (N)" so the sheet's SUMs stay right; the cards say "The Excel sheet holds N".
+Formulas stay formulas and every formula cell also gets its computed cached value (a phone
+preview does not recalculate). Row heights are set by hand in the client's sheet, so the
+export raises a row to fit what it writes and never below the template's. The template's HSE
+cumulative was wrong (`P+N`, N is blank) and is written as Previous + Today.
+
+Weather is written only as the day's working hours in a picked condition's slot (all 348
+real files carry the untouched default), with its checkbox ticked in both the ctrlProp part
+and the VML. "Hari ke-" held the constant 09/02/2021 in every file, so `S4` is the day of
+the project counted from week one's first day (`lib/daily-week.ts`), and the daily list is
+grouped by week. The daily sheet reads the contractor on the left ("Dibuat Oleh") and the
+client on the right; the project stores them the other way round, so the export swaps them.
+
+Proof is `scripts/verify-daily-xlsx.ts`: package soundness, only the sheet, the ctrlProps and
+the VML differ from the template (plus the drawing, its relationships and the media when
+there are photos), and the client's own 12 March workbook rebuilt as an input comes out cell
+for cell equal (read back with ExcelJS as an independent parser).
+
+**Excel IS on the development machine** (Office 16), so a rendered page can be looked at.
+Its COM type library is broken (`New-Object -ComObject` fails with TYPE_E_ELEMENTNOTFOUND),
+so drive it late-bound: `cscript //nologo scripts/xlsx-to-pdf.vbs <dir> <name>` opens
+`<dir>\<name>.xlsx` read-only in a NEW hidden instance, lists its pictures with their cells
+and prints it to PDF, and `scripts/pdf-to-png.ps1 -Dir <dir> -Name <name>` renders the pages
+with Windows' own PDF renderer. The person's own Excel window is never touched; check with
+`Win32_Process` that no `/automation` instance is left behind. Measure a picture's shape from
+pixels (a drawn circle's width over height), never by eye.
+
+# The plan leaves as a Gantt PDF
+
+Added 8 Oct 2026 from a mockup he approved at real A4 size. A PDF button beside Details on
+the project page opens `GanttPdfDialog`: the whole plan or one work package (`packagesOf`,
+the weekly export's fallback to top branches), and All levels / Top level / 2 / 3, with
+"N rows · N pages" counted by the same layout the PDF is cut with. The file comes from
+`/api/pdf/projects/[id]` rendering `/print/projects/[id]` (`components/print/GanttPrint.tsx`),
+A4 landscape, and draws what the planner draws from the same facts and Bars choices.
+
+**Nothing is cut off.** A long task name wraps and its row grows; duration and dates always
+fit. Row heights are decided on the server by `lib/gantt-print.ts` from Inter's widths,
+rounded up, because the sheets are cut there and the bars and arrows sit on the same grid as
+the table. Change the column widths, the font or the sheet padding together with `SHEET`.
+
+**Every sheet explains itself**: the key at the foot names every mark the file uses, a sheet
+that starts inside a heading says "Continued from", and an arrow whose other end is on
+another sheet or not in the file is a short arrow with that row's number. The foot reads
+"Lucille by Figtries" with the Lucille mark and the page number, and NO print date: he asked
+for quiet branding like Oracle's "© Oracle Corporation", but never "©", because the plan is
+the client's and not ours.
+
+**Two Chromium traps, each found by measuring the file.** An SVG `<pattern>` (the forecast
+hatch) is written into the PDF as a raster image the width of the page, and `opacity` on a
+shape makes a transparency group per bar: nine pages came to 1.4 MB. Hatches are drawn as
+lines (`Hatch`), shapes use `fill-opacity`, and the footer uses `lucille-mark-print.png`
+(38×64, 3 KB) instead of the 110 KB mark: 432 KB now. And **a named page dropped the whole
+CSS block**: `page: gantt` with `@page gantt { size: A4 landscape }` in `globals.css` vanished
+from Turbopack's output with no error, taking every `.gantt-*` rule with it. The print page
+carries its own `@page { size: A4 landscape }` instead; it prints nothing else. Check a CSS
+change reached the browser (`document.styleSheets`), not only the file.
+
+# The weekly report leaves as ONE Excel workbook
+
+Decided 3 Oct 2026; spec `docs/superpowers/specs/2026-10-03-weekly-excel-export-design.md`,
+plan `docs/superpowers/plans/2026-10-03-weekly-excel-export.md`. "Export Excel" REPLACED
+"Save as PDF" in the weekly bar: one button on Summary, Detail, S-Curve and Photos opens a
+pop-up (`ExportExcelDialog`, variant V2 of two he compared) where Documentation, Summary
+Overall, and Detail / S-Curve for Overall and each work package are ticked; all are ticked
+on opening. The PDF route and `/print/weekly` stay, unlinked, as the daily PDF did.
+
+**THE LOOK IS THE SAMPLE'S, THE CONTENT IS THE APP'S.** "Yang kumaksud sama hanyalah
+tampilan, kalo isi kita kan sudah benar." The look is `contoh.xlsx` (`...\Weekly Report\W45\`)
+minus the logos (they belong to one company) and minus `Data Overall`. Every figure, row,
+curve and photo is what the screens show: `lib/xlsx/weekly-input.ts` computes nothing of its
+own (rollup, `summariseUnits`, `buildSCurveSeries` / `buildPackageSCurves`), rounds the way
+`lib/figures.ts` does and apportions the Summary's package columns so each adds to its total.
+So the S-curve stops at the exported week like the screen, NOT at the project's end like the
+sample. **Values, never formulas** ("angka jadi aja"): the sample's formulas all read
+`Data Overall`.
+
+**Work packages are the Summary cards' groups**, named as the project names them
+(`SummaryRow.key` is the stable id the pop-up and the route share). Never a hard-coded "SPK":
+a project with no flagged unit gets its top branches. A package's Detail sheet weighs its rows
+as a share of the package (closes at 100%); a package nested in another reports only in its own.
+
+**It is BUILT, not patched** (unlike the daily export): row count follows the WBS and sheet
+count the packages, so `lib/xlsx/weekly-export.ts` writes the package from scratch and takes
+only the look from `lib/xlsx/weekly-skin.ts`, which `scripts/build-weekly-skin.ts` GENERATES
+from the sample. The skin's row numbers (`SUMMARY`, `DETAIL`, `SCURVE` in `weekly-sheets.ts`)
+are the sample's and are the whole cell map. The S-curve chart is the sample's chart with its
+refs and caches cut out, refilled per sheet, caches included so a phone preview draws it.
+
+**A frozen pane must name its top-left cell.** Lifting the sample dropped `topLeftCell` from
+Detail's `<pane state="frozen">` and Excel refused the whole file with only "Unable to get the
+Open property of the Workbooks class"; found by opening one sheet kind per file. **Fit a
+multi-page sheet to N tall, not 0**: Documentation's copies of the page with `fitToHeight="0"`
+spilled each page's last row of photos onto a sheet of its own.
+
+Proof is `scripts/verify-weekly-xlsx.ts` (input against the screens' readers, then the
+workbook read back by ExcelJS; package soundness, no formula, no external link). The look is
+checked in Excel itself (see the daily section above for the late-bound `cscript` recipe):
+the full workbook opens, but closing a 12-sheet one can hang the hidden instance, so run it
+under `//T:` and stop only the `/automation` process you started.
+
+# Progress has one origin
+
+**`lib/progress.ts` decides every leaf percentage, and `lib/rollup.ts` calls it
+instead of reading `cumProgressPct`.** For `qty` and `milestone` items the
+stored percent is only a cache; trusting it over the quantity it came from is
+how a report ends up disagreeing with the site. `applyFieldProgress` in
+`lib/mutations.ts` is the only writer for those methods, and it writes through
+`syncLeafSnapshot` — the evidence decides the percentage, never the reverse.
+`lumpsum` still reads the typed value, unchanged, so every seeded project
+behaves exactly as before.
+
+**Switching an item's method clears the other method's evidence** — a stale
+quantity sitting behind a milestone item is a number nobody can explain later.
+
+**Catalogs are per project.** Delay causes, HSE rows and crew groups live in
+`db.catalogs` (see `lib/catalogs.ts`), not in `lib/defaults.ts`. The first daily
+report of a project seeds its rows from them; later reports carry their
+predecessor's rows forward, so editing a catalog mid-project never rewrites the
+shape of a report that is already signed. Weather is the deliberate exception:
+`WeatherInfo` is a fixed-shape record rather than a list, so making it
+configurable means changing the type and the daily form together.
+
+**`claimable` on a delay cause is load-bearing.** It is what lets
+`buildDelayRegister` assemble extension-of-time material without anyone
+re-classifying by hand. Photos carry no capture metadata yet, so `/klaim` states
+plainly that the evidence is contestable — keep that admission until timestamps
+and GPS are actually stored.
+
+# Changing how you measure must not change what was measured
+
+**`applyProgressMethod` carries progress ACROSS a method change, never through
+it.** An August 2026 bug proved why: switching "Project Management" to quantity
+mode recomputed all 60 weeks from a `qtyDone` that did not exist yet, silently
+rewriting a leaf that had sat at 100% for 27 weeks down to zero and dropping
+the project total from 68.80% to 67.83%. The percentage is now re-expressed in
+the new method's own terms — a quantity is seeded from it, milestones are
+awarded in order and never past it.
+
+**`vol: 1, satuan: 'Ls'` is not a quantity.** It is how every seeded item is
+stored, and it passes a naive `vol > 0` check, which is how the above happened.
+Use `hasRealQuantity()`; switching such an item to quantity mode must ask for a
+real total first rather than inventing one.
+
+# Multi-project
+
+**db.json is a `Workspace`: a map of per-project records** (see
+`lib/workspace.ts`), each read and written by its own key. `readDb()` — "the
+file's active project" — was removed with Gundih on 26 Sep 2026; nothing may
+read a project out of db.json without naming it. Legacy single-project files
+are still wrapped on read and never rewritten until something is saved.
+
+**Anything the root layout reads must be cached.** `getProjects()` and
+`getWorkspace()` in `lib/data.ts` exist because an uncached read in
+`app/layout.tsx` blocks every route in the app and fails the build on
+`/_not-found` with "Uncached data was accessed outside of `<Suspense>`".
+
+**Approvals snapshot the figure approved.** A signature that silently follows
+the number it signed is worth nothing in a dispute, so the panel shows drift
+when the week is edited afterwards.
+
+**The deployed app has no disk, so the database is a SNAPSHOT.** On Vercel
+there is no `data/report.db`, so `lib/db-path.ts` falls back to a copy of
+`data/seed.db` in the lambda /tmp — and that copy is per-instance AND
+per-function. Creating a project wrote it inside the function serving
+`/projects`; the redirect to `/projects/[id]` was served by a different
+function whose /tmp still held the untouched seed, so the page 404d on a
+project the previous screen had just made (11 Sep 2026 — the deployed list was
+byte-for-byte the committed seed). `lib/db-snapshot.ts` gives that file one
+durable home: pulled at cold start from `instrumentation.ts` before the first
+query, pushed after every write, and re-checked with a conditional GET before
+a read. The driver stays synchronous, which is the whole point — an async one
+would force `<Suspense>` around every read in the app.
+
+**The snapshot lives in REDIS since 1 Oct 2026, not Blob.** The read check was
+a conditional GET on the Blob object, and a 304 still counts: across every
+lambda that came to the Hobby store's 10,000 Simple Operations in nineteen
+days, the store was suspended for 30 days (no reads, no dashboard download, no
+replacement store), and every lambda served `data/seed.db`. The image and a
+version string now sit in two keys of the Upstash Redis already attached for
+db.json (`weekly-report:sqlite:img` gzipped, `weekly-report:sqlite:ver`); a
+read check is one GET of the version and the image moves only when it changed
+(`scripts/verify-snapshot-redis.ts`). And a push needs the store to have
+ANSWERED first (`adopted`): an instance whose pull failed holds the seed, and
+uploading it would replace the database (`scripts/verify-snapshot-guard.ts`).
+The last Blob image (1.99 MB, 1 Oct 03:53 UTC) is still in the suspended store
+and has to be merged in by hand once it can be read.
+
+Four things hold it together. Writes are detected in `lib/sqlite.ts` by
+patching the connection rather than by each of the fifty-odd server actions
+remembering, because `insert ... returning` runs through `.all()` and would
+have been missed. `db` is exported through a PROXY so a pulled snapshot can
+close and reopen the database under callers that imported it at module load.
+The push is AWAITED in `lib/project-actions.ts` rather than left to `after()`,
+because each of those actions is followed straight away by a navigation and an
+in-flight upload is a redirect landing on a project the next lambda has never
+heard of. And it is a SINGLE-WRITER design: two people editing in the same
+second can have one file-level snapshot land on top of the other. With no
+`BLOB_READ_WRITE_TOKEN` the whole module is inert and the app behaves exactly
+as it did — ephemeral, but working. A developer machine is never touched
+either: it keeps its own `data/report.db`, which is the gate.
+
+**A new COLUMN reaches the deployment through `ensureSchema()`, not through a
+migration.** Nothing runs `drizzle-kit migrate` on Vercel: `instrumentation.ts`
+pulls the blob snapshot over the database file before the first query, so the
+snapshot's schema IS the deployed schema and the file that was just built gets
+overwritten by it. `EXPECTED_COLUMNS` in `lib/db-snapshot.ts` is the list that
+is put back after every restore, called from `writeDbFile` because that is the
+single place incoming bytes land; append one line per column added from here on.
+It runs ONLY on bytes from the store: repairing a developer's own
+`data/report.db` would leave the drizzle journal disagreeing with the file and
+break the next `migrate` on a duplicate column. A local database is migrated,
+not repaired. This does not solve new TABLES, which would also need their
+indexes and foreign keys, so that remains a deployment question to answer before
+writing the code.
+
+**`data/seed.db` is TRACKED, and a migration must reach it too.** It is the file
+`lib/db-path.ts` copies into `/tmp` when there is no disk, so a deployment with
+no blob store attached opens it directly and no snapshot layer is awake to
+repair anything. Migrate it with `REPORT_DB_PATH=data/seed.db npm run db:migrate`
+— and then CHECKPOINT it, because the write lands in `seed.db-wal` and leaves
+the committed file untouched, which git reports as no change at all:
+`new Database('data/seed.db').pragma('wal_checkpoint(TRUNCATE)')`.
+
+**`fs.copyFileSync` on a WAL database silently copies the past.** Every script
+that builds a throwaway fixture from `data/report.db` hits this: recent writes
+live in `report.db-wal` and a file copy leaves them there. It stayed invisible
+while the missing writes were rows nobody asserted on, and stopped being
+invisible when `projects` gained `alias` — two verify scripts died with
+`no such column: "alias"`, which looks exactly like a bug in the code under
+test. Use `copyDbFixture` from `scripts/db-fixture.ts` (it serializes, the same
+image the snapshot push uploads).
+
+**Attaching the store is a deploy-time act, not a dashboard act.** Creating the
+Blob store and connecting it to the project is only half of it: Vercel bakes
+environment variables into a deployment when that deployment is built, so the
+instance already serving traffic keeps running WITHOUT the token it was never
+given, and the app goes on silently losing every write. It has to be REDEPLOYED
+after the store is connected. This cost 12 Sep 2026 — the store was created and
+connected, the 404 did not budge, and the running deployment still reported
+`hasBlobToken: false`.
+
+Which is what `/api/health/db` is for. It makes the deployed instance answer for
+itself — token present, `snapshotConfigured`, which file it opened, whether that
+file is the throwaway `/tmp` copy, which projects it can see, and whether the
+store answers a list — so the three causes that look identical from outside (no
+store, a failing store, a write that never ran) can be told apart in one
+request. Check it before theorising; the token itself is never printed.
+
+**A clock read before a request read 500s on the DEPLOYMENT and nowhere else.**
+Under `cacheComponents`, `Date.now()` in a server component before any uncached
+or Request data has been read ("`cookies()`, `headers()`, `connection()`,
+`searchParams`") is a static-generation bailout. `ensureFreshDb()` throttles
+itself on the clock, and `getActiveProjectId()` used to call it BEFORE reading
+the cookie — harmless locally, where no blob store is attached and the function
+returns before it ever looks at the time. On Vercel it took out every
+`/dokumen/[week]` path that was not in `generateStaticParams` (12 Sep 2026).
+Anything that reads a clock in a render must come after a request read.
+
+Which is also how a broken route hides: **a prerendered page still answering
+`X-Vercel-Cache: STALE` with `Age` climbing past `X-Nextjs-Stale-Time` is a
+FAILING function, not a warm cache** — its regeneration has been throwing since
+the deploy while the CDN serves the build-time entry. Compare against a route
+you know is healthy (`/weekly/60/summary` answered `REVALIDATED`, then `HIT`
+with `Age: 0`). The 500 page itself carries no digest, so read the real error
+with `npx vercel logs <deployment-url> --json` — tail it in the background,
+curl the failing path, and each entry's `logs` array holds the Next.js message.
+
+# Which store a project reads, and which one it writes
+
+**Every project's weekly figures live in SQLite; db.json holds its daily
+reports.** Dashboard, Weekly Progress and Reports read whichever project is OPEN
+through `getOpenDb` / `getOpenWeekRollup` / `getOpenSCurveSeries` in
+`lib/data.ts`, all of it SQLite through `lib/dashboard-db.ts`. Writes go
+through `lib/actions.ts` → `sqliteProject()` → `lib/progress-sqlite.ts`, which
+calls `lib/progress.ts` for every figure so the evidence still decides the
+percentage. With no project open, a weekly write refuses rather than guessing.
+
+**GUNDIH WAS REMOVED ON 26 SEP 2026, and the db.json fork went with it.** It
+had been the imported reference project, the only one with `legacy_json_id`,
+and it read its weekly figures from db.json because its two stores disagreed
+by up to 12.85 points. The user deleted it from the deployment and asked for it
+gone everywhere. Gone: its rows in `data/report.db` and `data/seed.db` (FK
+cascade, proved empty after), its `p-utama` record and the `seed` script that
+rebuilt it, the whole weekly db.json read/write path (`getDb`, `readDb`,
+`isLegacyProject`, the cached rollups), the v1 portfolio and setup wizard
+(`/portfolio`, `/setup`, `lib/setup.ts`), the db.json approval, contract-value
+and WBS/S-curve/week API routes, and the importer and verify scripts that only
+proved Gundih's own numbers. Verify scripts that used Gundih as a FIXTURE for
+general rules now run on the largest plan in the database or on a hand-built
+plan (`verify-weights`, `verify-worklist`, `verify-week-grid`, `verify-paste`);
+`verify-chains` and `verify-bar-styles` went, because only a plan of Gundih's
+shape exercised them. **The `legacy_json_id` column stays in the schema,
+empty**: dropping it is the drizzle table rebuild that deletes child rows (see
+below). Nothing reads it.
+
+**`targetWF` is never written on the SQLite side.** The curve comes from the
+dates. `applyWeekUpdates` accepts a target only because db.json stores the curve
+per leaf per week; `saveWeekUpdatesSqlite` drops it.
+
+**A PDF cannot ask which project is open, so the URL tells it.** `lib/pdf.ts`
+launches headless Chromium with no cookies, so `/print/*` would resolve the open
+project from `app_state` — and on a deployment the cookie and that row are
+exactly the pair that disagree. `app/api/pdf/weekly/[week]/route.ts` resolves it
+in the USER's request and passes `?project=`; `getPrintDb` renders an empty sheet
+for an id it does not know, never somebody else's.
+
+**Still db.json for Daily, Klaim and the Settings catalogs — PER PROJECT.**
+They need tables SQLite does not have, and **a deployment restores its schema
+from the blob snapshot, not from a migration** (`instrumentation.ts` pulls the
+file; nothing runs `drizzle-kit migrate`), so adding a table is a deployment
+question before it is a code one — answer that first. `db.json` holds a MAP of
+projects; `jsonKeyFor()` in `lib/legacy-bridge.ts` names each project's record
+(its SQLite id), created on first write and seeded with the identity SQLite
+already holds. Read through `getOpenJsonDb()` / `getPrintJsonDb()`, write
+through `mutateOpenDb()`. On the deployment that map lives in Redis
+(`weekly-report:db`), not in the file. `mutateDb()` — whatever the FILE calls
+active — is gone: its last caller was the weekly photo route, which refused
+every save while a project was open, so no project could keep a weekly photo
+(`dashboard-db` builds each week with an empty `documentation`). **Weekly
+photos now live in the project's own JSON record**, `Database.weeklyPhotos`
+keyed by week number (`lib/weekly-photos.ts`), written through
+`mutateProjectDb` by `app/api/weeks/[week]/photos/route.ts`, read by the
+Documentation page and the weekly PDF through `getOpenJsonDb()` /
+`getPrintJsonDb()`. The file lands under `/uploads/weekly/<projectId>/<week>/`
+so two projects' week 48 never share a folder.
+
+**An index route that redirects must resolve the project behind `<Suspense>`.**
+`/weekly` and `/dokumen` send you to a week number, and reading db.json's sent a
+two-week project to week 36. The open project is a cookie, so the redirect lives
+in a child component with `connection()` and a `null` fallback — an uncached read
+in the page body fails the build.
+
+**A report tab must not wait for the server when it is pressed** (1 Oct 2026).
+`LegacyGate`'s `connection()` also ends a RUNTIME prefetch, so the router held
+only `SectionSkeleton` for Summary, Detail, S-Curve and Photos and every press
+showed grey blocks for a lambda round trip. Those four pass `prefetchable`,
+which makes the gate read the cookie instead, and the runtime prefetch then
+carries the finished page (measured at 300 ms latency: skeleton 330 ms → 0).
+Never pass it on a page that reads the clock: Check's `new Date()` fails the
+build under a runtime prefetch unless `connection()` came first. And do not
+reach for `<Link prefetch>` or `router.prefetch(href, { kind: 'full' })`:
+Next ignores a full prefetch on any route that exports `instant`.
+
+**Weight follows price, unless the weights are authoritative.** `weight_basis =
+'boq'` is the LOCK. Only the imported project ever carried it and that project
+is gone, so today no project does; the code path stays and
+`scripts/verify-weights-auto.ts` proves it by locking a fixture copy. The "Lock these
+weights" button and its dialog were REMOVED on 24 Sep 2026 because they only
+confused people (the dialog said "Apply anyway" when nothing would change);
+nothing in the app can set the lock any more. Everything else re-derives on
+every price edit, every structural change (`renumber()` is the funnel) and every
+pasted BOQ — see `lib/weights-auto.ts`. A leaf no budget reaches weighs 0 and
+is stored as 0 (24 Sep 2026: the even share of what was left is gone, see "A
+BUDGET IS THE ONLY THING" above); the Weights strip names every such leaf so
+the gap is reminded rather than guessed. And a row that stops being a leaf
+stops carrying a weight, the same stale-flag family as `isMilestone`.
+
+# Document Control: Summary, Data, Setup
+
+Redesigned 4 Oct 2026 from mockups he chose (Summary A, Data B, Setup B). The
+week row and the four tabs above them are NOT part of it and stay as they are.
+
+**Summary** is one ledger: KPI strip, week by week beside the disciplines (most
+behind first), and Needs action split into what is with us and what is with the
+client. **Data** is the list; a row opens `DocumentSheet`, built on
+`ActivityPanel`'s shell and motion, where a document controller edits
+everything about one document. A transmittal is recorded from a sheet or from
+ticked rows ("Send 3 as IFA"); the standing "Record transmittal" button was
+removed because the sheet already does it. **Export and Setup sit where the
+weekly report's Export Excel sits** (`RegisterMarks`): solid squares in the week
+row beside Current on a phone ("Set as current" wraps to two lines to make room,
+`WeekRow`'s `max-sm` classes), and the page's top-right corner from md, labelled
+"Export Excel" / "Setup" from xl. Blue is Lucille's `primary`, violet is
+`check`. The corner copy is a SIBLING of the week column: the column's entrance
+animation leaves a transform that would anchor `absolute` to the column and put
+the buttons over Set as current. The list's title is the register's name and
+nothing else. **The phone Data screen is the F-Phone mockup he approved**: the
+overview card carries the title and "N docs", the filters stand on the page
+(the picked one dark), each discipline is its own card. A group wrapper is never
+`overflow-hidden` from md: it would become the sticky header's scroller and push
+the header down over the first row.
+
+**Setup** (`RegisterSetup`) holds the documents, the number's shape (the
+project's initial is locked; area, discipline and type codes are the
+register's), the client's codes and each stage's short name, full name, colour,
+weight and the Rev it goes out with (`lib/register-settings.ts`). **Rev is
+derived**: a document's Rev is the one its latest issue carries under that rule,
+each resubmission one more (A, B, C / 0, 1, 2); a blank rule falls back to the
+typed Rev. The stage and code KEYS never change, only their words. **The two
+sides are never asked here**: contractor and client are the project's, and a
+register only reads them (`writeCategories` writes them only from an import
+that names both).
+
+**A register can add stages after AFC** (9 Oct 2026, "+ Add a stage" on
+Setup): keys `S1`, `S2`… with one resubmission each, `RE_S1`, behaving like
+IFR/IFA (sent, back with APP/AWC/RWC, RWC goes out again). The three are
+locked; an added one is removed only while nothing was sent at it
+(`saveRegisterSettings` refuses otherwise). Order, validity and labels go
+through `stageRank` / `stageChain` / `isStageKey` / `stageLabel` in
+`lib/register-shared.ts`, never `STAGE_ORDER` alone, and the sheet and the
+overview read `mainStagesOf(settings)` / `isAddedStage`.
+
+**A reminder is red, a sentence, and sits where the gap is.** Only what would
+write a wrong figure holds Save back (weights that are not 100, a blank code or
+short name); a missing plan date or an empty heading is reminded, never refused.
+
+**Summary and Data read ONE rule** (8 Oct 2026). Data's Needs action had its
+own predicate and drifted from the Summary's both ways: a drawing at 100%
+waiting on the client's AFC reply was listed, "due soon" was not, and a
+document sitting with the client counted as late. `actionOf` in
+`lib/register.ts` now decides, per document, what it needs; `getObstacles`
+(the Summary's list) and `DocumentCard.action` (Data's chips, the red Plan
+date, the red "overdue", the sheet's "Chase them") are both built from it, and
+the chips are `needsAction` / `withUs` / `isDone` in `register-shared.ts`. A
+document at 100% needs nothing (`isFull`). The Summary's "With us" / "With
+client" counts are Data's chips of the same names. A shown return code is the
+LATEST stage's, only while unanswered; `next` is what Send offers
+(`sendNextOf`), never the stage whose date passed. Proof:
+`scripts/verify-register-agree.ts`, every project, week and register.
+Data's groups come from `dataGroups`, never a walk of the leaves: a
+sub-discipline added to a group that already held documents left them on the
+group, and a leaves-only list hid them from Data while the Summary counted
+them. Such a group gets its own row, before its sub-groups, with figures from
+its own documents (`RegisterNode.own`).
+
+**The register curve wipes in with a CSS keyframe** (`.animate-curve-wipe`),
+not framer-motion: its `initial` clip shipped hidden in the server HTML and held
+the route's view transition at frame zero, so headless Chrome never painted the
+Summary. That is the "entrance is a keyframe" rule above, proved again.
+
+# One boundary above a page, never a stack
+
+**A route may have ONE `<Suspense>` between the shell and the page that
+postpones** (13 Nov 2026). `/projects/[id]` had three: the list's
+`loading.tsx`, its own, and a `<Suspense>` in the page with the same skeleton.
+The outer two finished during the prerender, were outlined as `S:2` / `S:3`,
+and the resume reused those ids: every full load of a plan threw #418 and
+mounted the planner twice, so `#row=…&open=kind` was consumed by the copy
+thrown away and the kind view never opened. Seen on phones, which reload a tab
+far more often. The list now lives in `app/projects/(list)/` so its
+`loading.tsx` covers the list alone, and the plan page awaits `params` straight
+under its own `loading.tsx`. A `loading.tsx` covers every route beneath it:
+before adding one above a dynamic child, give the sibling page a route group.
+Only a production build shows it. `scripts/verify-hydration.mjs` predates
+sign-in and is redirected to /login; until it mints a session, use
+`scripts/_press-set-in-plan.mjs` (Data Overall, Set in plan, Cancel, Escape,
+Back, the deep link, the menu's card), which fails on any console error.
+
+# Roles and sign-in
+
+**Sign-in is real since 12 Nov 2026.** Before it, accounts and passwords lived in
+the Master's browser only, so an account made on one browser could not sign in
+on another ("Email or password is incorrect"). Now `lib/auth-store.ts` keeps
+accounts (scrypt hashes for sign-in; the password is also kept AES-sealed so a
+MASTER can read it back through `action: 'reveal'`, never in any other answer;
+key = AUTH_SECRET, else the Redis token, else `data/auth.key`; an account made
+before this shows after its next sign-in), the Master's roles and the sessions in
+ONE document: Redis key `weekly-report:auth` on the deployment, `data/auth.json`
+(gitignored) locally. `app/api/auth/route.ts` is the only door (login, logout,
+first-Master setup, Roles' saves) and re-checks every rule: only a Master makes,
+unmakes or edits a Master; nobody removes, suspends or un-Masters themself; at
+least one Master stays. `proxy.ts` opens nothing without a valid session
+(`/login`, `/api/auth`, `/api/health`, `/print/*` and static files excepted;
+`/print` because headless Chromium has no cookie). **While the document holds no
+account, /login creates the first Master, once** — so on a fresh deployment the
+Master must open /login first. `lib/signed-in.ts` is now a CACHE of the
+server's answer for the sidebar, AccessGate and LOCK_SCRIPT; AccessGate re-syncs
+it on every load. Still only client-side: View vs No access per page (the
+cover), and Server Functions do not check the account's access themselves.
+The text below predates this and its "nothing is saved" no longer holds.
+
+Added 3 Oct 2026. **Roles took Settings' slot at the foot of the sidebar**; the
+lists Settings held are daily-report lists the daily report edits itself, so
+`/settings` stays reachable by its URL and is linked from nowhere (the same
+treatment as the unlinked PDF routes). Since 28 Oct 2026 `/roles` is Access
+management, set PER ACCOUNT (`components/roles/AccessBoard.tsx`): accounts on
+the left, the selected one's projects and No access / View / Edit per
+destination on the right (a sheet below lg), changed on a draft that lands only
+on Save. A role is only a PRESET that fills an account in ("· Custom" once
+changed). The Master is always Edit everywhere and cannot be suspended or
+removed.
+NOTHING IS SAVED AND NOTHING IS RESTRICTED: there is no login (board item 22),
+so the page says "Draft" above the cards and a reload puts `lib/roles.ts` back.
+That file is the whole content (roles, destinations, defaults); the user will
+supply the real roles, so change them there and nowhere else.
+
+# The v2 rebuild — read this before starting new work
+
+The app is being rebuilt from fundamentals against the CPP Gundih data
+(3 workbooks, 4 SPK, 285 WBS rows, 142 documents, 415 days). The decisions are
+locked and there is a numbered work board. **The blueprint is the plan of
+record:**
+
+> https://claude.ai/code/artifact/d3dfeed6-8a05-4ba8-87f5-2affe3da7c47
+
+Work happens on branch `v2-foundation`; `main` is untouched until it is
+deliberately fast-forwarded. To update the blueprint from any session, publish
+with that URL as `url` — publishing without it creates a duplicate artifact
+instead.
+
+**The user briefs by number.** Do one item, finish it, stop. Do not roam into
+neighbouring items; the scattering that produced this board is the thing it
+exists to prevent.
+
+```
+FASE 0 — pondasi
+01 Fondasi database          selesai   17 tabel · Drizzle · SQLite
+02 Kurva rencana diturunkan  selesai   30/30 cocok Gundih
+03 Navigasi 12 → 6           selesai   Sidebar 488→268
+04 Dashboard halaman depan   selesai
+05 Visual dashboard          selesai   per kontrak · sebaran · laju
+FASE 1 — data nyata masuk
+06 Importer Gundih           selesai   W43 bobot/progress/WF cocok PDF · target 75,37
+   + register EDL           selesai   20/21 kategori cocok · leaf engineering belum ditautkan
+FASE 2 — bahasa visual
+07 Design system                       token shadcn + satu kurva framer-motion
+FASE 3 — laporan mingguan
+08 Halaman Ringkasan
+09 Halaman Kurva S
+10 Halaman Detail Progress
+11 Halaman Dokumentasi
+12 Data Overall workbench
+13 PDF format Pertamina
+FASE 4 — yang mengisi laporan
+14 Form Harian → draft ringkasan mingguan
+15 Modul Document Control  selesai   EDL + VDRL · 5 layar · per minggu · jalur menulis · tautan
+FASE 5 — membuat proyek dari nol
+16 Project management        selesai   bikin · pilih · arsip · hapus · identitas
+17 Planner                   selesai   WBS · tanggal · Gantt · tempel dari
+                                       Excel · bar styles · rantai
+                                       12 Sep 26: turun ke 4 kolom (jadwal
+                                       saja); harga, bobot dan target pindah
+                                       ke papan 12. Initial proyek (tiga
+                                       huruf) ditanya saat proyek dibuat.
+18 Baseline berversi
+FASE 6 — dashboard yang berpikir
+19 Dashboard bulanan                   ahead · outstanding · warning · problem
+FASE 7 — setelah isinya terbukti
+20 Impor dan ekspor Excel
+21 Penyusun blok laporan
+22 Login dan peran
+```
+
+Papan 16 dan 17 selesai 6 September 2026 dalam delapan langkah; rencananya, tiap
+keputusan dan tiap angka yang diukur ada di
+`docs/superpowers/specs/2026-09-06-projects-redesign.md`. Yang paling mengikat
+kode: rantai antar-pekerjaan DITEBAK dari tanggal dan tidak pernah disimpan
+(`lib/chains.ts`), warna batang datang dari pilihan proyek dan bukan dari kode
+(sejak 7 Okt 2026 `lib/bar-view.ts`, lihat "Bars read the plan"; daftar aturan
+`lib/bar-styles.ts` sudah dihapus), dan tanggal target adalah janji —
+satu-satunya tanggal yang boleh diketik di baris ringkasan, dan ia tidak pernah
+menggeser apa pun.
+
+**Warna yang tidak bisa membedakan bukan warna.** Dikunci 6 September 2026
+setelah dibuktikan pada proyek berisi lima baris: `assignColorGroups` memakai
+baris teratas sebagai "paket" tanpa memeriksa apakah baris itu cabang, jadi
+empat baris teratas — tiga di antaranya leaf — dapat empat warna berbeda, satu
+warna per baris. Sekarang sebuah paket harus CABANG, dan prinsip yang sama
+dipakai `canColourByPackage` (`lib/bar-view.ts`): "Package" tidak ditawarkan
+pada rencana yang cuma punya satu paket, dan legenda hanya menyebut warna serta
+tanda yang benar-benar ada di grafik.
+
+**Dua daftar siap pakai** (`TYPE_PRESET`, `PACKAGE_PRESET`, `projects.bar_preset`)
+dihapus 7 Okt 2026 bersama editor aturannya; penggantinya panel Bars, lihat
+"Bars read the plan".
+
+**Baris beranak tidak pernah milestone.** Flag itu dipasang saat baris masih
+leaf dan basi begitu ada yang di-indent ke bawahnya; `renumber()` di
+`lib/sheet-structure.ts` — satu-satunya jalan yang dilewati setiap perubahan
+struktur — sekarang menghapusnya, dan salinan renumber di `lib/paste-actions.ts`
+melakukan hal yang sama.
+
+**Paket menutupi apa pun yang ada di dalamnya, di kotak TERSIMPAN dan bukan
+cuma di layar.** Sebuah cabang menggambar kotaknya sendiri yang dilebarkan oleh
+anak-anaknya (`rowSpan`), sementara pagarnya membaca kotaknya saja (`boxAt`).
+Tidak ada yang menjaga keduanya sejalan: tanggal yang DIKETIK dipagari, tapi
+indent, drag dan tempel tidak pernah melihat tanggal paketnya sama sekali. Jadi
+sebuah paket bisa memegang kotak satu hari dengan pekerjaan berbulan-bulan di
+dalamnya, lalu setiap tanggal di bawahnya ditolak dengan menyebut rentang yang
+tidak muncul di layar mana pun — Engineering di PHSS Samberah tersimpan 30 Des
+25 sampai 30 Des 25, tergambar 30 Des 25 sampai 08 Nov 26, dan kedua barisnya
+beku permanen (14 Sep 2026). `coverChildren` di `lib/sheet.ts` menyusulkan kotak
+tersimpan ke bar yang sudah tergambar; dia hanya MELEBARKAN, karena kotaknya
+sendiri ikut jadi bahan min/max, jadi apa pun yang diketik orang selamat.
+Dipanggil dari `renumber()` (kedua salinannya) dan sekali lagi di
+`updateRowDatesAction` sebelum pagar diperiksa — pagar yang sudah bocor bukan
+pagar, dan rencana yang dibuat sebelum aturan ini ada hanya bisa lepas di situ.
+
+Papan ini disusun ulang 27 Agustus 2026 setelah data sumber dibaca baris demi
+baris. Rencana lengkapnya — alasan tiap urutan, tujuh belas temuan pada workbook
+asli, dan struktur ketiga berkas sebagai rujukan importer — ada di
+`docs/superpowers/specs/2026-08-27-project-control-v2-design.md`. Baca itu
+sebelum mengambil nomor mana pun.
+
+**Ketika tanggal dan kurva bertentangan, tanggal yang menang.** Dikunci 27
+Agustus 2026 setelah dibuktikan pada data Gundih: 126 dari 176 leaf (88,38%
+bobot proyek) punya kolom PLAN yang tidak cocok dengan kolom tanggal di
+sebelahnya — `1.4.3.2` naik rata 1/16 per minggu selama 16 minggu padahal
+tanggalnya 105 hari alias 15 minggu. Kolom PLAN itu diketik tangan dan tidak
+pernah diperbarui. Karena itu `scripts/import-gundih.ts` membaca blok PLAN tapi
+tidak pernah menyimpannya; dia memakainya sebagai alat uji dan mencetak daftar
+leaf yang bertentangan. Akibatnya target W43 keluar 75,37% sementara PDF yang
+sudah ditandatangani menulis 75,15% — selisih 0,22 poin yang di W60 menjadi nol.
+Bobot, progress dan WF kumulatif tetap cocok sampai dua desimal.
+
+**Empat keputusan tampilan, dikunci di sesi yang sama.** Semua elemen datang dari
+shadcn-ui; semua animasi dan transisi datang dari framer-motion, dengan satu
+kurva dan satu durasi untuk seluruh aplikasi; setiap halaman harus benar di
+iPhone, Android, Windows dan desktop, diverifikasi dengan gambar pada 390px dan
+desktop; dan aplikasi ini dipakai orang berumur 22 sampai 60, jadi kontras
+tinggi, target sentuh ≥44px, dan tidak ada informasi yang hanya muncul saat
+hover. Tiga pengecualian, ketiganya soal kebenaran dan bukan selera: baris tabel
+yang bisa melebihi ~20 memakai kelas shadcn dengan elemen native di dalamnya;
+`/print/*` tidak memakai framer-motion karena Puppeteer memotret tanpa menunggu
+animasi; dan **animasi masuk saat halaman dimuat adalah keyframe CSS, bukan
+framer-motion**.
+
+Yang ketiga dibuktikan 30 Agustus 2026. `motion.div` menuliskan prop `initial`-nya
+ke dalam HTML dari server: Overall Summary mengirim enam elemen dengan
+`opacity: 0` dan Detail Progress dua, sehingga tidak ada yang terlihat sampai
+JavaScript-nya selesai diunduh, diurai dan dihidrasi — lalu semuanya muncul
+sekaligus. Diukur di Chrome headless dengan CPU ditahan 4×, tiga detik pertama
+halaman itu di `next dev` hanya kebagian sepuluh frame animasi dengan jeda satu
+detik di tengahnya. Menukar pustakanya bolak-balik tidak mengubah jumlah frame di
+luar variasi antar-jalan, jadi biayanya memang bukan pustaka itu — markup yang
+disembunyikan sampai hidrasi itulah masalahnya. Keyframe CSS ada di cat pertama,
+berjalan di compositor, dan selesai dengan benar meski bundle-nya tidak pernah
+tiba. framer-motion tetap dipakai untuk gerak yang dipicu state setelah halaman
+hidup. Angkanya tetap satu tempat: `MOTION` di `lib/design.ts`, dicerminkan oleh
+`--ease-out-expo` dan durasi di `.animate-fade-in-up` / `.animate-level-*` pada
+`globals.css` — ubah satu, ubah yang lain. Alasan lengkapnya ada di
+`components/motion/Reveal.tsx`.
+
+**Masuk halaman punya SATU SKALA, bukan satu kelas.** Tiga ukuran, dan yang
+membedakan adalah seberapa besar bendanya: `.animate-fade-in-up` (8px/0,26s)
+untuk yang kebetulan muncul — centang di dalam tombol, spanduk galat, satu
+baris; `.animate-enter` (16px/0,42s, `MOTION.enter`) untuk SEKSI yang datang,
+yaitu yang dibungkus `Reveal`; dan `.animate-rise-in` (18px/0,7s) untuk satu
+permukaan hero. Jeda antar-saudara ditulis sebagai kelas `.stagger-1`…`.stagger-8`,
+bukan `style={{ animationDelay }}` di tiga puluh berkas. Berhenti di 8 karena
+apa pun yang lebih jauh dari itu ada di bawah lipatan, dan bawah lipatan bukan
+milik jeda.
+
+**Di bawah lipatan memakai `ScrollReveal`, dan URUTANNYA adalah fiturnya.**
+Komponen itu tidak pernah mengirim status tersembunyi di HTML server: dia
+menyembunyikan elemen hanya SETELAH observer memastikan elemen itu benar-benar
+di bawah lipatan. Ponsel yang tidak pernah menerima bundle merender halaman
+utuh, dan orang yang menggulir lebih cepat daripada hidrasi tidak pernah
+melihat kartu lenyap di bawah jarinya. Dua jebakan sudah dibayar: aplikasi ini
+tidak menggulir dokumen — `<main>` yang menggulir, dan di laporan mingguan ada
+scroller kedua di dalamnya — jadi observer harus BERAKAR pada scroller-nya,
+karena `rootMargin` tidak bisa menembus klip leluhur; dan `rootMargin` atasnya
+dibuka lebar (`10000px`) supaya yang sudah terlewati tetap terhitung
+berpotongan, sebab observer hanya melapor saat status potongan BERUBAH dan
+elemen yang dilompati viewport tidak pernah dilaporkan sama sekali — pemulihan
+posisi scroll melakukan itu setiap kali. Jangan pasang di dalam `.map()` yang
+bisa melebihi ~20 baris.
+
+**Perpindahan rute: `RouteTransition`, dan TIDAK ADA `app/template.tsx`.**
+Template di akar me-remount seluruh subtree tiap navigasi — itu memang gunanya —
+sehingga pindah dari Summary ke Detail ikut merobohkan
+`app/weekly/[week]/layout.tsx`: week picker, stepper dan seluruh baris tab
+dihancurkan lalu dibangun ulang di antara dua tab minggu yang sama, dan badge
+"Current" mengulang `animate-pop-in`-nya tiap kali. Sekarang batasnya dipasang
+tangan: layout seksi membungkus dirinya dengan id tetap (`weekly`), tiap halaman
+membungkus akarnya dengan id sendiri (`weekly-summary`), dan React melihat
+pertukaran berkunci sehingga kelas `enter`/`exit` benar-benar terpakai.
+Penggantinya sempat berupa client component yang memanggil `usePathname()`, dan
+itu gagal build persis seperti peringatan di atas — di bawah `cacheComponents`
+pathname adalah bacaan tak-ter-cache, dan membacanya di root layout memblokir
+setiap rute; build mati di `/print/daily/[date]`. Halaman sudah tahu dirinya
+halaman apa, jadi id-nya dioper dan komponennya tetap server component.
+Animasinya sendiri hanya opacity: yang bergerak saat pindah rute adalah kartu-
+kartu di dalamnya, bukan satu lempeng abu-abu — dan sebuah transform pada
+snapshot sebesar Detail Progress justru cara paling cepat membuatnya tersendat
+di ponsel.
+
+**The four decisions that constrain code the most.** A reporting unit is a
+FLAGGED WBS NODE, never a hierarchy level — and units nest, so a unit's weight
+is its subtree minus any unit inside it (SPK-007 sits at `1.4.4` inside
+SPK-004's `1.4`, yet both are reported separately; without the subtraction the
+total reaches 114%). The plan curve is DERIVED, never stored: only weight,
+start and finish live in the database, and each leaf spreads linearly across
+its own duration. Deviation is measured against two baselines that live side by
+side — Kontraktual, locked, for claims; Aktif, the latest agreed revision, for
+managing the work. And a leaf's percentage comes from one of four methods:
+kuantitas, milestone, lumpsum, or **tertaut**, where an engineering leaf reads
+its figure straight from the document register instead of being measured twice.
+
+**Two traps that have already cost a day each.** The SQLite driver must be
+SYNCHRONOUS (`better-sqlite3`, not libsql): with `cacheComponents: true` a sync
+embedded-database query counts as deterministic and prerenders, while an async
+driver forces `<Suspense>` around every read in the app. And exceljs must be
+driven through `ExcelJS.stream.xlsx.WorkbookReader` — plain `readFile` died at a
+2 GB heap on the 11.8 MB weekly workbook.
+
+**A drizzle migration that recreates a table DELETES ITS CHILDREN.** SQLite
+cannot add a column to an existing unique index, so `drizzle-kit generate` falls
+back to build-new-table / copy / `DROP TABLE` / rename, wrapped in
+`PRAGMA foreign_keys=OFF … PRAGMA foreign_keys=ON`. That pragma is a NO-OP
+inside a transaction, and drizzle runs migrations in one — so the DROP cascaded
+and took all 357 `doc_stages` rows with it (August 2026, `documents` gained
+`register`). Two habits: copy `data/report.db` before `drizzle-kit migrate`, and
+COUNT THE CHILD ROWS afterwards. The generated SQL also copies columns by name
+including the one being added, so the `SELECT` must be hand-edited to a literal
+for the new column or the migration fails outright.
+
+**Three smaller ones, each an hour.** shadcn's `Card` carries its own
+`py-(--card-spacing)`, so a `CardContent` with its own padding doubles it — pass
+`py-0` on the Card. framer-motion's `pathLength` is implemented with
+stroke-dasharray, so it silently shreds a line that already has
+`strokeDasharray` and any path on a stretched viewBox with
+`vector-effect: non-scaling-stroke`; wipe with `clipPath` instead. And an SVG
+scaled to fit its container scales its `<text>` too — at 390px the axis labels
+came out about five pixels tall, so chart labels are HTML positioned over the
+plot, never `<text>`.
+
+**The app is in English; the printed report is not.** Every screen, label,
+button, error message and number format in the app reads in English — decimal
+POINT, `en-GB` dates, `fmtPct`/`fmtNum` in `lib/analysis.ts`. What stays as it
+is: anything that comes from the data (WBS descriptions, document titles,
+category names, catalog rows a project typed for itself), and everything under
+`/print/*`, which is the client's own signed deliverable in the client's own
+format. `components/print/*` formats its numbers inline with `en-US` and never
+imports the app's formatters, which is what keeps the two apart.
+
+**Verifying UI work.** The Browser pane never composites in this environment, so
+`computer{action:"screenshot"}` always fails. Use `scripts/shoot.mjs <url>
+<out.png> [w] [h]`, which drives the Chrome already here for PDFs, and actually
+look at the image — desktop and 390px. Extracted text shows content, never
+composition. Never verify a build through a pipe either: `next build | grep`
+reports grep's exit code, so write to a file and echo `$?`.
+
+# Token discipline (baca seperlunya, kerja seperlunya, berhenti)
+
+Tiap giliran memuat ulang instruksi + daftar tools + file ini, jadi biaya terbesar adalah "biaya nyala", bukan cara ngetik. Turunkan dengan disiplin:
+
+- Investigate dulu, terarah: cari dengan Grep/Glob pola spesifik; baca hanya range baris yang perlu (offset/limit), bukan file utuh — apalagi file besar.
+- Jangan baca ulang file yang barusan diedit hanya untuk "memastikan"; tool edit sudah error kalau gagal.
+- Batch tool call yang tidak saling bergantung dalam satu langkah, bukan satu-satu.
+- Patch yang ditargetkan, bukan menulis ulang seluruh file. Edit hanya yang berubah.
+- Jangan dump isi file panjang ke balasan; rujuk path + nomor baris. Output ringkas, tanpa preamble/rekap.
+- Verifikasi murah (satu perintah yang membuktikan), lalu STOP. Jangan menambah polish/refactor yang tidak diminta.
+- Percakapan panjang: `/compact`. Ganti tugas: `/clear`. Batasi MCP server yang aktif — tiap server menambah daftar tools yang dibaca tiap giliran.

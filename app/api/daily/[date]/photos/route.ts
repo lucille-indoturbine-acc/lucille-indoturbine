@@ -1,0 +1,118 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { after, connection } from 'next/server';
+import { mutateOpenDb } from '@/lib/db';
+import { deleteUploadedPhoto, preparePhotoUpload } from '@/lib/upload';
+
+const PAGE_SIZE = 6;
+
+// Warm-up: PhotoUploadGrid pings this when the photos appear and when Add is
+// pressed, so a cold instance boots while the file picker is open instead of
+// after a photo is chosen. Same file, so the same Vercel function as POST.
+export async function GET() {
+  await connection();
+  return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
+}
+
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ date: string }> }
+) {
+  const { date } = await params;
+  const formData = await request.formData();
+  const slot = Number(formData.get('slot'));
+  const file = formData.get('file');
+
+  if (!(file instanceof File) || Number.isNaN(slot) || slot < 0) {
+    return NextResponse.json({ error: 'Invalid upload' }, { status: 400 });
+  }
+
+  try {
+    const { relPath, meta, persist } = await preparePhotoUpload(file, 'daily', date, slot);
+    let previousPath: string | null = null;
+    // Photo write and db mutation run concurrently — neither needs the
+    // other's result, only the precomputed path.
+    const [updated] = await Promise.all([
+      mutateOpenDb((db) => {
+        const report = db.daily.find((d) => d.date === date);
+        if (!report) throw new Error(`Daily report for ${date} not found`);
+        if (slot >= report.photos.length) throw new Error(`Slot ${slot} out of range`);
+        previousPath = report.photos[slot] ?? null;
+
+        db.photoMeta ??= {};
+        db.photoMeta[relPath] = {
+          path: relPath,
+          takenAt: meta.takenAt,
+          lat: meta.lat,
+          lon: meta.lon,
+          device: [meta.make, meta.model].filter(Boolean).join(' ') || undefined,
+          uploadedAt: new Date().toISOString(),
+          verified: !!meta.takenAt,
+        };
+        if (previousPath && db.photoMeta[previousPath]) delete db.photoMeta[previousPath];
+        report.photos[slot] = relPath;
+        return report;
+      }),
+      persist(),
+    ]);
+    // Replaced photo is unreachable once the db points elsewhere — clean it
+    // up after the response instead of making the client wait for it.
+    after(() => deleteUploadedPhoto(previousPath).catch(() => undefined));
+    return NextResponse.json(updated);
+  } catch (err) {
+    return NextResponse.json({ error: (err as Error).message }, { status: 400 });
+  }
+}
+
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ date: string }> }
+) {
+  const { date } = await params;
+  const slot = Number(new URL(request.url).searchParams.get('slot'));
+
+  try {
+    let removedPath: string | null = null;
+    const updated = await mutateOpenDb((db) => {
+      const report = db.daily.find((d) => d.date === date);
+      if (!report) throw new Error(`Daily report for ${date} not found`);
+      removedPath = report.photos[slot] ?? null;
+      report.photos[slot] = null;
+      return report;
+    });
+    after(() => deleteUploadedPhoto(removedPath).catch(() => undefined));
+    return NextResponse.json(updated);
+  } catch (err) {
+    return NextResponse.json({ error: (err as Error).message }, { status: 400 });
+  }
+}
+
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ date: string }> }
+) {
+  const { date } = await params;
+  const { action, pages } = (await request.json()) as { action?: string; pages?: number };
+  // More than one page at once when a multi-photo pick needs more room than is left.
+  const count = Math.min(Math.max(Math.floor(Number(pages) || 1), 1), 20);
+
+  try {
+    const updated = await mutateOpenDb((db) => {
+      const report = db.daily.find((d) => d.date === date);
+      if (!report) throw new Error(`Daily report for ${date} not found`);
+      if (action === 'addPage') {
+        report.photos.push(...Array<string | null>(PAGE_SIZE * count).fill(null));
+      } else if (action === 'removePage') {
+        if (report.photos.length <= PAGE_SIZE) throw new Error('Cannot remove the first page');
+        const lastPage = report.photos.slice(-PAGE_SIZE);
+        if (lastPage.some((p) => p !== null)) throw new Error('Last page still has photos');
+        report.photos.length -= PAGE_SIZE;
+      } else {
+        throw new Error('Unknown action');
+      }
+      return report;
+    });
+    return NextResponse.json(updated);
+  } catch (err) {
+    return NextResponse.json({ error: (err as Error).message }, { status: 400 });
+  }
+}

@@ -1,0 +1,142 @@
+'use client';
+
+import { pressMotion } from '@/components/motion/Press';
+
+import { m } from 'framer-motion';
+
+import { useState, useTransition } from 'react';
+import SoftSheet from '@/components/ui/SoftSheet';
+import { useRouter } from 'next/navigation';
+import { createDailyAction } from '@/lib/actions';
+import DateField from '@/components/ui/DateField';
+
+export default function NewDailyButton({ defaultDate }: { defaultDate: string }) {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  // Set in the navigation's own transition: the sheet leaves with no exit,
+  // because a hidden tree (the router keeps /daily as display: none) runs no
+  // effects and an exit still in flight would come back on Back.
+  const [gone, setGone] = useState(false);
+  const [date, setDate] = useState(defaultDate);
+  const [error, setError] = useState<string | null>(null);
+  // Covers the action AND the navigation that follows, so the dialog keeps
+  // its progress state until the new report page takes over the screen.
+  const [creating, startTransition] = useTransition();
+
+  const weekdayPreview = date
+    ? new Date(`${date}T00:00:00Z`).toLocaleDateString('en-GB', {
+        weekday: 'long',
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'UTC',
+      })
+    : '';
+
+  function openModal() {
+    setDate(defaultDate);
+    setError(null);
+    setGone(false);
+    setOpen(true);
+  }
+
+  function closeModal() {
+    setOpen(false);
+  }
+
+  function create() {
+    if (creating) return;
+    setError(null);
+    startTransition(async () => {
+      const res = await createDailyAction(date);
+      if (!res.ok) {
+        setError(res.error);
+        return;
+      }
+      // Navigate client-side instead of redirecting inside the action: the
+      // destination's loading skeleton appears immediately, so the wait reads
+      // as "the page is being prepared" rather than a frozen dialog.
+      //
+      // The dialog closes in the SAME transition as the navigation, so it goes
+      // off screen in the commit that shows the report, not before (no frozen
+      // gap) and not after. It used to close from an effect once `creating`
+      // turned false, but by then this list is kept hidden (display: none) by
+      // the router, and a hidden tree runs no effects: the dialog stayed open
+      // behind the report and came back on Back until the effect caught up.
+      // Measured 1 Oct 2026: the dialog's DOM was still there, hidden, on the
+      // report page. After an `await` a state update is no longer part of the
+      // transition, hence the second `startTransition`.
+      startTransition(() => {
+        setOpen(false);
+        setGone(true);
+        router.push(`/daily/${date}`);
+      });
+    });
+  }
+
+  return (
+    <>
+      <m.button {...pressMotion}
+        onClick={openModal}
+        className="inline-flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg btn-primary px-4 py-2 text-sm font-medium sm:flex-none"
+      >
+        <svg className="h-4 w-4" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+          <path d="M10 4.5v11M4.5 10h11" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+        </svg>
+        New Daily Report
+      </m.button>
+
+      {!gone && (
+        <SoftSheet open={open} onClose={() => !creating && closeModal()} label="New Daily Report" size="sm" className="px-5 pb-5 sm:p-6">
+            <h2 className="text-lg font-semibold text-foreground">New Daily Report</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Choose the day for this report.</p>
+
+            <label htmlFor="new-daily-date" className="mt-5 block text-xs font-medium text-muted-foreground">
+              Date
+            </label>
+            <DateField
+              id="new-daily-date"
+              value={date}
+              disabled={creating}
+              onChange={(v) => {
+                setDate(v);
+                setError(null);
+              }}
+              className="mt-1 h-11 w-full min-w-0 rounded-lg border border-input bg-card px-3 text-base text-foreground shadow-sm transition-all duration-200 ease-ios hover:border-muted-foreground/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-chart-1 disabled:opacity-60 sm:h-10 sm:text-sm"
+            />
+            {weekdayPreview && <p className="mt-1.5 text-sm font-medium text-foreground">{weekdayPreview}</p>}
+            {error && <p className="mt-2 text-sm text-bad">{error}</p>}
+
+            <div className="mt-6 grid grid-cols-2 gap-2 sm:flex sm:justify-end">
+              <m.button {...pressMotion}
+                onClick={closeModal}
+                disabled={creating}
+                className="btn-cancel rounded-lg px-4 py-2.5 text-sm sm:py-2"
+              >
+                Cancel
+              </m.button>
+              <m.button {...pressMotion}
+                onClick={create}
+                disabled={creating || !date}
+                className="inline-flex items-center justify-center gap-2 rounded-lg btn-primary px-4 py-2.5 text-sm font-medium sm:py-2"
+              >
+                {creating && (
+                  <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.3" strokeWidth="2.5" />
+                    <path d="M21 12a9 9 0 00-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                  </svg>
+                )}
+                {creating ? 'Creating…' : 'Create'}
+              </m.button>
+            </div>
+
+            {creating && (
+              <p role="status" className="mt-3 text-center text-xs text-muted-foreground animate-fade-in">
+                Setting up the report page. This only takes a moment…
+              </p>
+            )}
+        </SoftSheet>
+      )}
+    </>
+  );
+}

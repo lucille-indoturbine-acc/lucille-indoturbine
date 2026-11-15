@@ -1,0 +1,808 @@
+import { RouteTransition } from '@/components/motion/RouteTransition';
+import { ScrollReveal } from '@/components/motion/ScrollReveal';
+import Link from 'next/link';
+import EmptyState from '@/components/ui/EmptyState';
+import { Suspense, type ReactNode } from 'react';
+import {
+  ArrowRight,
+  ChartLine,
+  FolderKanban,
+  Scale,
+  TrendingDown,
+  TrendingUp,
+  type LucideIcon,
+} from 'lucide-react';
+
+import {
+  computeHealth,
+  contributions,
+  fmtNum,
+  fmtPct,
+  validateWeek,
+  weekMovers,
+} from '@/lib/analysis';
+import { formatMoneyShort } from '@/lib/currency';
+import { flattenTree, promoteNestedSpkContracts, summariseUnits, summaryTitle } from '@/lib/rollup';
+import { weightGate } from '@/lib/weight-gate';
+import { loadWeightFixes } from '@/lib/weights-read';
+import WeightGateNotice from '@/components/dashboard/WeightGateNotice';
+import PriorityActionsCard from '@/components/dashboard/PriorityActionsCard';
+import { buildPriorityActions, LOOK_AHEAD_WEEKS } from '@/lib/priority-actions';
+import { buildWorklist } from '@/lib/worklist';
+import { currentWeekOf } from '@/lib/current-week';
+import { getOpenDb, getWeekRollup } from '@/lib/data';
+import { buildProjectDashboardData } from '@/lib/dashboard-db';
+import { getActiveProjectId } from '@/lib/projects';
+import { buildSCurveSeries } from '@/lib/scurve';
+import ProgressCurve from '@/components/dashboard/ProgressCurve';
+import {
+  ContributionList,
+  ForecastTrack,
+  MeasureLegend,
+  ProgressSpread,
+  UnitBreakdown,
+  VelocityBars,
+  WeekStory,
+  type LeafSpread,
+} from '@/components/dashboard/charts';
+import DashboardWeekBar from '@/components/dashboard/DashboardWeekBar';
+import { Reveal } from '@/components/motion/Reveal';
+import { CountUp, Tween } from '@/components/motion/CountUp';
+import { TYPE, verdictChip, verdictOf, verdictText } from '@/lib/design';
+import { Badge } from '@/components/ui/badge';
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import { cn } from '@/lib/utils';
+import { tidyName } from '@/lib/tidy-name';
+
+// Spelled out, NOT left to the root layout's title template: a template only
+// reaches CHILD segments, and this page sits in the root segment beside the
+// layout that defines it — so '/' was the one screen whose tab never said
+// Lucille, which is the screen most people leave open.
+export const metadata = { title: 'Lucille · Dashboard' };
+
+/**
+ * The dashboard is the product's main advantage, so it does not stop at the
+ * number — it states the cause, and it shows it.
+ *
+ * IT ANSWERS FOR THE PROJECT THAT IS OPEN, AND FOR THE WEEK YOU PICK. It used
+ * to read `db.json`, which holds exactly one project, so opening any other left
+ * this page drawing Gundih under a sidebar naming something else — and it was
+ * pinned to the latest week with no way to look at any other. Both come from
+ * `getOpenDb()` now: whichever store the open project reads, per week. The fix
+ * for the first of those went too far and read SQLite for EVERY project, which
+ * put this page's figures on a store the imported project does not report from;
+ * see the note on `getOpenDb()` below.
+ *
+ * THE WEEK LIVES IN THE QUERY, AND THAT IS WHAT KEEPS THIS PAGE HONEST. Reading
+ * `searchParams` is an uncached read, so the body sits behind `<Suspense>` and
+ * is rendered per request rather than baked into the prerendered shell — which
+ * is exactly the bug that let a stale shell name one project while the projects
+ * page named another.
+ *
+ * FOUR RULES HOLD THE LAYOUT TOGETHER.
+ *
+ * It reads in three tiers, and the tiers are what make it understandable: WHERE
+ * WE ARE (the hero, which owns actual, plan, deviation and SPI and is the only
+ * place they appear), WHY (the sentence and the three items dragging the number
+ * down, given real room rather than buried in the seventh card), and THE
+ * EVIDENCE (a uniform wide-then-narrow grid nobody has to rank by eye). Before
+ * this, ten cards of equal weight sat in four different grid splits and the eye
+ * was told nothing about where to go after the hero.
+ *
+ * Colour and type come from `lib/design.ts` and nothing here invents either.
+ * Measurement is `--chart-1` actual / `--chart-2` plan on every line and bar;
+ * verdict is `--ok` / `--bad` and lands only on figures, chips and words —
+ * including the headline percentage itself, which turns red the week the
+ * project falls behind its plan.
+ *
+ * Motion comes from framer-motion through `Reveal`, one curve and one duration
+ * for the whole app. Every chart is hand-drawn SVG rather than Recharts: they
+ * are all static, so drawing them by hand keeps them out of the hydration path.
+ *
+ * EVERY CARD IN A ROW IS THE SAME HEIGHT. `items-start` used to let the short
+ * card in each pair stop early, which left a white hole the height of a hand
+ * beside "Work spread" and again beside "Forecast".
+ */
+
+/**
+ * How many rows the breakdown card prints before it hands over to the Overall
+ * Summary screen. Six because the cards in that row are stretched to a common
+ * height (see above) — an uncapped list on a plan with no contracts is its own
+ * top level, thirty rows long, and "Work spread" beside it becomes the white
+ * hole that rule was written to close.
+ */
+const UNIT_ROWS = 6;
+
+/**
+ * A card's top-right action ("Update", "All items", "2 findings") centred on
+ * the TITLE'S line. CardAction starts at the header's top, and at 14px or 11px
+ * against a 15px title it sat 2 to 3px above the title's middle (26 Sep 2026).
+ * h-6 is the title's line box (15px × leading 1.625).
+ */
+const ACTION = 'flex h-6 items-center';
+
+export default function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ week?: string }>;
+}) {
+  return (
+    <RouteTransition id="dashboard">
+      <Suspense fallback={<DashboardSkeleton />}>
+        <DashboardBody searchParams={searchParams} />
+      </Suspense>
+    </RouteTransition>
+  );
+}
+
+async function DashboardBody({ searchParams }: { searchParams: Promise<{ week?: string }> }) {
+  const { week: weekParam } = await searchParams;
+
+  const projectId = await getActiveProjectId();
+  const data = projectId ? await buildProjectDashboardData(projectId) : null;
+
+  if (!data) {
+    return (
+      <Empty
+        icon={FolderKanban}
+        title="No project open"
+        body="Make one, or open one you already keep. Every number on this page belongs to a project."
+        href="/projects"
+        cta="Go to Projects"
+      />
+    );
+  }
+
+  // A project with rows but no weight cannot be measured, and a bar chart of
+  // zeroes would say the work has not started rather than that nobody has
+  // priced it. Weight is derived from the BOQ; the planner is where that lives.
+  if (!data.hasPlan) {
+    return (
+      <Empty
+        icon={Scale}
+        title={`"${data.db.project.name}" has no weights yet`}
+        body="Weight comes from the priced BOQ, and the plan curve from each item's dates. Fill those in and this page fills itself in."
+        href={`/projects/${projectId}`}
+        cta="Open the planner"
+      />
+    );
+  }
+
+  // THE FIGURES COME FROM THE STORE THE PROJECT READS, not from whichever one
+  // this page can reach. `getOpenDb()` is that fork — the imported project reads
+  // db.json, every other project reads SQLite — and Weekly Progress, Data
+  // Overall and the printed report have gone through it for months. This page
+  // went straight to the SQLite adapter instead, and the two stores do not
+  // agree: on Gundih it drew week 36 as 68.20 against 72.57 while every other
+  // screen drew the same week of the same project as 70.39 against 71.93. The
+  // front page was the one number nobody else could reproduce.
+  //
+  // `buildProjectDashboardData` still answers for the PROJECT — whether it has
+  // weights at all, and the currency and contract value its money is priced in.
+  // Those belong to the project rather than to a week, they are the same in
+  // either store, and db.json simply never had a field for them.
+  const openDb = await getOpenDb();
+  const db = {
+    ...openDb,
+    project: {
+      ...openDb.project,
+      contractValue: openDb.project.contractValue ?? data.db.project.contractValue,
+      projectBudget: openDb.project.projectBudget ?? data.db.project.projectBudget,
+    },
+  };
+
+  // TWO WEEKS, AND THEY ANSWER DIFFERENT QUESTIONS. Holding one number for both
+  // is what made this screen disagree with itself.
+  //
+  // `reportedWeek` is how far the FIGURES go: the last week anybody filed. The
+  // banner reads it, and zero is the honest answer on a project nobody has
+  // filled in yet. `currentWeek` is the week the project is IN, which is a fact
+  // about the calendar and true before a single figure is entered. It used to
+  // be the reported week here as well, so a new project opened on week 1 while
+  // the work was somewhere in the middle of the plan.
+  const reportedWeek = db.project.currentWeek;
+  const currentWeek = currentWeekOf(db);
+
+  // The week being viewed: whatever was asked for if the project has it,
+  // otherwise the project's current week — never a week off the calendar. The
+  // list is the store's own, for the same reason the figures are.
+  const weeks = db.weeks.map((w) => w.week);
+  const asked = Number(weekParam);
+  const fallback = weeks.includes(currentWeek) ? currentWeek : weeks[0];
+  const week = weeks.includes(asked) ? asked : fallback;
+
+  const rollup = getWeekRollup(db, week);
+  const health = computeHealth(db, week);
+
+  if (!rollup || !health) {
+    return (
+      <Empty
+        icon={ChartLine}
+        title="No progress data yet"
+        body="Build the WBS and its weights first. Every number on this page fills itself in after that."
+        href={`/projects/${projectId}`}
+        cta="Open the planner"
+      />
+    );
+  }
+
+  // NO FIGURE UNTIL THE WEIGHTS CLOSE (26 Sep 2026). Every percentage below is
+  // a share of the total weight; while that total is short of 100, or an
+  // activity weighs nothing, the page says so instead of dividing anyway. See
+  // lib/weight-gate.ts. The header stays, so the week picker still works.
+  const gate = weightGate(db.wbsItems);
+  if (!gate.ok) {
+    return (
+      <div className="mx-auto max-w-6xl space-y-4 px-3 py-5 sm:p-6 lg:p-8">
+        <DashboardHeader
+          name={db.project.name}
+          customer={db.project.customer}
+          reportedWeek={reportedWeek}
+          weeks={weeks}
+          week={week}
+          currentWeek={currentWeek}
+          anchorEnd={db.project.weekAnchorEndDate}
+        />
+        <WeightGateNotice
+          gate={gate}
+          week={week}
+          budget={db.project.projectBudget ?? null}
+          currency={data.currency}
+          fixes={projectId ? await loadWeightFixes(projectId, week) : []}
+        />
+      </div>
+    );
+  }
+
+  const validation = validateWeek(db, week);
+  // Priority Actions: what has to be done in the three weeks after this one,
+  // by activity. The plan at the window's end comes from that week's own
+  // rollup; late and ending-soon are the worklist's, as on Data Overall.
+  const horizonWeek = Math.min(week + LOOK_AHEAD_WEEKS, health.lastWeek);
+  const worklist = buildWorklist({
+    roots: rollup.roots,
+    schedule: db.schedule,
+    week,
+    changeLog: db.changeLog,
+    weightsLocked: db.project.weightsLocked,
+  });
+  const priorities = buildPriorityActions({
+    roots: rollup.roots,
+    horizonRoots: getWeekRollup(db, horizonWeek)?.roots ?? rollup.roots,
+    schedule: db.schedule,
+    week,
+    horizonWeek,
+    worklist,
+    // What the forecast knows that the plan does not: a vendor date, a late
+    // delivery pushing what waits for it. See lib/priority-actions.ts.
+    forecast: health.forecast ? { slipping: health.forecast.slipping, path: health.forecast.path.map((p) => p.id) } : null,
+  });
+  // Why the project sits where it does, BOTH WAYS: every item's part in the
+  // deviation, apportioned so the parts add up to the deviation as printed.
+  // Behind, the list is what holds it back; ahead, what carries the lead. It
+  // used to be laggards only, so a project with nothing behind listed a
+  // finished item at "−0.00%" and called it the reason.
+  const parts = contributions(rollup.roots, health.deviationPct);
+  const holding = parts.filter((c) => c.share < 0).sort((a, b) => a.share - b.share);
+  const carrying = parts.filter((c) => c.share > 0).sort((a, b) => b.share - a.share);
+  const heldBack = Math.abs(holding.reduce((s, c) => s + c.share, 0));
+  const carried = carrying.reduce((s, c) => s + c.share, 0);
+  const curve = buildSCurveSeries(db, week);
+  const weekMeta = db.weeks.find((w) => w.week === week);
+  const movers = weekMovers(rollup.roots, health.addedPct, weekMeta?.leafData ?? {});
+  // What this splits into, in whichever of the three ways the plan supports:
+  // the units it marked, the "(SPK-###)" contracts the importer wrote, or its
+  // own top level. A project that was never given packages still gets the
+  // breakdown — "where does the percentage come from" is the question this card
+  // answers, and every plan can answer it somehow.
+  const { basis: unitBasis, rows: units } = summariseUnits(
+    promoteNestedSpkContracts(rollup.roots)
+  );
+
+  // By weight, not by count: a 3.3% leaf and a 0.03% leaf are not equals.
+  const weighted = flattenTree(rollup.roots).filter((n) => n.isLeaf && n.bobot > 0);
+  const totalBobot = weighted.reduce((s, n) => s + n.bobot, 0);
+  const bucketOf = (pct: number) => (pct >= 99.995 ? 'done' : pct > 0 ? 'running' : 'notStarted');
+  const spread: LeafSpread = weighted.reduce<LeafSpread>(
+    (acc, n) => {
+      const bucket = bucketOf(n.curProgressPct);
+      acc[bucket] += 1;
+      acc[`${bucket}Weight` as const] += n.bobot;
+      return acc;
+    },
+    { notStarted: 0, running: 0, done: 0, notStartedWeight: 0, runningWeight: 0, doneWeight: 0 }
+  );
+  // Which items ENTERED each state this week — the "+1 this week" on a row.
+  const arrived = { done: 0, running: 0, notStarted: 0 };
+  for (const n of weighted) {
+    const now = bucketOf(n.curProgressPct);
+    if (now !== bucketOf(n.prevProgressPct)) arrived[now] += 1;
+  }
+
+  const verdict = verdictOf(health.deviationPct);
+  const behind = verdict === 'behind';
+  const weeksLeft = Math.max(0, health.lastWeek - health.week);
+  const curveWeeks = curve.map((r) => r.week);
+  const firstWeek = curveWeeks.length ? Math.min(...curveWeeks) : health.week;
+
+  return (
+    // Beside the sidebar the page ends one card-gap (16px, the `space-y-4`
+    // between every card) below the last card. 32px read as a strip left
+    // empty, and 0 put the card against the foot of the screen (both 27 Sep
+    // 2026). Phones keep their padding: Safari's toolbar floats over the foot
+    // of the screen there.
+    <div className="mx-auto max-w-6xl space-y-4 px-3 py-5 sm:p-6 lg:p-8 lg:pb-4">
+      <DashboardHeader
+        name={db.project.name}
+        customer={db.project.customer}
+        reportedWeek={reportedWeek}
+        weeks={weeks}
+        week={week}
+        currentWeek={currentWeek}
+        anchorEnd={db.project.weekAnchorEndDate}
+      />
+
+      {/* ------------------------------------------------ tier 1 · where we are */}
+      <Reveal>
+        {/* py-0 because the curve runs to the card's own edges — shadcn's Card
+            carries py-(--card-spacing) of its own, which would leave a white
+            strip under a full-bleed child. Two columns on desktop so the figures
+            and the curve each fill a side; stacked on a phone. */}
+        <Card className="py-0">
+          <div className="grid lg:grid-cols-[24rem_1fr]">
+            <div className="p-5 sm:p-8 lg:border-r">
+              <p className="text-sm font-medium text-muted-foreground">
+                Week {health.week} of {health.lastWeek}
+              </p>
+              <p className={cn('mt-1.5', TYPE.hero, verdictText[verdict])}>
+                <CountUp value={health.actualPct} />
+              </p>
+              <p className="mt-2.5 text-sm text-muted-foreground">Done to date</p>
+
+              {/* Always stacked: a wrapping row put the money beside the
+                  verdict one week and under it the next (25 Oct 2026). */}
+              <div className="mt-4 flex flex-col items-start gap-1.5">
+                {/* Plain coloured text, not a tinted pill: the pill's padding
+                    pushed its words in past the left edge every other line in
+                    this column starts on (26 Sep 2026). */}
+                <p className={cn('flex items-center gap-1.5 text-sm font-semibold', verdictText[verdict])}>
+                  {behind ? (
+                    <TrendingDown className="h-4 w-4" />
+                  ) : (
+                    <TrendingUp className="h-4 w-4" />
+                  )}
+                  <Tween value={Math.abs(health.deviationPct)} /> {behind ? 'behind' : 'ahead of'} plan
+                </p>
+                {health.scheduleVarianceRp !== null && Math.abs(health.scheduleVarianceRp) > 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    {/* In the project's OWN currency. `formatRupiah` stamped
+                        "Rp" on everything, which on a contract priced in
+                        dollars is not a rounding error, it is a wrong number. */}
+                    ≈ {formatMoneyShort(Math.abs(health.scheduleVarianceRp), data.currency)}{' '}
+                    {behind ? 'of work late' : 'of work early'}
+                  </p>
+                )}
+              </div>
+
+              {/* The rail carries the three figures that qualify the headline,
+                  each said exactly once on this page. */}
+              <dl className="mt-6 grid grid-cols-3 divide-x rounded-xl border bg-muted/40">
+                <Stat label="Plan this week" value={<Tween value={health.planPct} />} />
+                <Stat label="Schedule index" value={<Tween value={health.spi} suffix="" decimals={3} />} />
+                <Stat label="Weeks left" value={<Tween value={weeksLeft} suffix="" decimals={0} />} />
+              </dl>
+            </div>
+
+            {/* The legend and the week ticks are HTML over the plot, never SVG
+                <text>: the viewBox is stretched to fit, and it stretches its
+                own type with it — at 390px an SVG label came out five pixels
+                tall. On a phone the curve is 160px and its leading end reaches
+                exactly where an absolute legend would sit, so the legend only
+                floats on desktop. */}
+            <div className="relative flex min-h-44 flex-col justify-end text-foreground sm:min-h-56">
+              {/* TOP-LEFT on desktop, where the plot is empty because the curve
+                  starts low. It floated top-RIGHT until the endpoint chips
+                  moved in there — "Plan 71.93%" sat straight on top of it and
+                  clipped the word "Actual" in half. On a phone the legend is
+                  still in flow above the chart and never overlapped anything,
+                  so only the floating case moves. */}
+              <MeasureLegend className="justify-end px-5 pb-2 lg:absolute lg:left-8 lg:top-6 lg:justify-start lg:px-0 lg:pb-0" />
+              <ProgressCurve rows={curve} padTo={health.lastWeek} className="block h-40 w-full sm:h-56 lg:h-full" />
+              <div
+                className={cn(
+                  'pointer-events-none absolute inset-x-0 bottom-0 flex justify-between px-5 pb-2 lg:px-8 lg:pb-3',
+                  TYPE.meta
+                )}
+              >
+                {/* On its own tinted ground: the curve is flat at the left of a
+                    60-week project and runs straight through a bare label. */}
+                <span className="rounded bg-card/85 px-1">Week {firstWeek}</span>
+                <span className="rounded bg-card/85 px-1">Week {health.week}</span>
+              </div>
+            </div>
+          </div>
+        </Card>
+      </Reveal>
+
+      {/* ------------------------------------------------------- tier 2 · why */}
+      <Reveal delay={0.06}>
+        <Card>
+          <CardHeader>
+            <CardTitle className={TYPE.cardTitle}>
+              {behind ? 'Where the gap comes from' : verdict === 'ahead' ? 'Where the lead comes from' : 'Against plan'}
+            </CardTitle>
+            <CardDescription className={TYPE.cardDesc}>
+              {behind ? 'Items behind plan, by project % lost' : 'Items ahead of plan, by project % gained'}
+            </CardDescription>
+            <CardAction className={ACTION}>
+              <Link
+                href={`/weekly/${week}/detail`}
+                className="inline-flex items-center gap-1 text-sm font-medium text-chart-1 hover:underline"
+              >
+                All items <ArrowRight className="h-3.5 w-3.5" />
+              </Link>
+            </CardAction>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Every figure in the sentence and the list is a share of the
+                deviation apportioned to add up to it as printed, so "the 16.11%
+                lead comes from" is followed by numbers that make 16.11. */}
+            {behind ? (
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                {holding.length === 1 ? '1 item is' : `${fmtNum(holding.length)} items are`} behind, costing{' '}
+                <span className="font-semibold text-bad">{fmtPct(heldBack)}</span>
+                {/* Said whenever something is ahead, so the sentence ends on
+                    the hero's own gap: 4.37 held back, 1.39 given back, 2.98. */}
+                {carrying.length > 0
+                  ? `. ${fmtNum(carrying.length)} ahead ${carrying.length === 1 ? 'adds' : 'add'} back ${fmtPct(carried)}. Net gap ${fmtPct(Math.abs(health.deviationPct))}.`
+                  : '.'}
+                {holding.length > 3 ? ' Top 3:' : ''}
+              </p>
+            ) : verdict === 'ahead' ? (
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                Lead <span className="font-semibold text-ok">{fmtPct(health.deviationPct)}</span>
+                {holding.length === 0 && carrying.length <= 3
+                  ? ` from ${carrying.length === 1 ? '1 item' : `${fmtNum(carrying.length)} items`}:`
+                  : `: ${fmtNum(carrying.length)} ahead add ${fmtPct(carried)}, ${fmtNum(holding.length)} behind cost ${fmtPct(heldBack)}. Top 3:`}
+              </p>
+            ) : (
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                Exactly on plan this week.
+              </p>
+            )}
+            {verdict !== 'neutral' && <ContributionList rows={behind ? holding : carrying} limit={3} />}
+          </CardContent>
+        </Card>
+      </Reveal>
+
+      {/* -------------------------------------------------- tier 3 · evidence */}
+      <ScrollReveal>
+        <div className="grid gap-4 lg:grid-cols-3">
+          {units.length > 1 && (
+            <Card className="h-full lg:col-span-2">
+              <CardHeader>
+                <CardTitle className={TYPE.cardTitle}>{summaryTitle(unitBasis)}</CardTitle>
+                <CardDescription className={TYPE.cardDesc}>
+                  Where the overall percentage comes from
+                </CardDescription>
+                {units.length > UNIT_ROWS && (
+                  <CardAction className={ACTION}>
+                    <Link
+                      href={`/weekly/${week}/summary`}
+                      className="inline-flex items-center gap-1 text-sm font-medium text-chart-1 hover:underline"
+                    >
+                      All {fmtNum(units.length)} <ArrowRight className="h-3.5 w-3.5" />
+                    </Link>
+                  </CardAction>
+                )}
+              </CardHeader>
+              <CardContent className="flex flex-1 flex-col">
+                <UnitBreakdown
+                  rows={units}
+                  limit={UNIT_ROWS}
+                  totalBobot={totalBobot}
+                  deviationPct={health.deviationPct}
+                />
+              </CardContent>
+            </Card>
+          )}
+
+          <Card className={cn('h-full', units.length > 1 ? '' : 'lg:col-span-2')}>
+            <CardHeader>
+              <CardTitle className={TYPE.cardTitle}>Work spread</CardTitle>
+              <CardDescription className={TYPE.cardDesc}>
+                How much of the project has been started
+              </CardDescription>
+            </CardHeader>
+            {/* The bar and its key sit at the top; what the week did fills the
+                rest, pinned to the bottom so this card and its neighbour end on
+                the same line. That room was empty until 26 Sep 2026, and the
+                page had nowhere that said what happened in the week it shows. */}
+            <CardContent className="flex flex-1 flex-col">
+              <ProgressSpread spread={spread} arrived={arrived} />
+              {/* SEJAJAR MEANS STRETCH: the week starts under the key, behind
+                  one rule, and grows to the card's foot so this card and its
+                  taller neighbour share both edges. No box of its own: a box in
+                  a box was the complaint (26 Sep 2026). */}
+              <div className="mt-6 flex flex-1 flex-col">
+                <WeekStory
+                  week={week}
+                  addedPct={health.addedPct}
+                  planAddedPct={health.planAddedPct}
+                  prevDeviationPct={health.prevDeviationPct}
+                  deviationPct={health.deviationPct}
+                  deviationChange={health.deviationChange}
+                  movers={movers}
+                  moreHref={`/weekly/${week}/overall`}
+                />
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </ScrollReveal>
+
+      <ScrollReveal>
+        <div className="grid gap-4 lg:grid-cols-3">
+          <Card className="h-full lg:col-span-2">
+            <CardHeader>
+              <CardTitle className={TYPE.cardTitle}>Added each week</CardTitle>
+              <CardDescription className={TYPE.cardDesc}>
+                Whether the pace is steady or lurching
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-1 flex-col">
+              <VelocityBars rows={curve} />
+              <p className="mt-auto pt-4 text-sm text-muted-foreground">
+                Running at{' '}
+                <span className="font-semibold text-foreground">
+                  {fmtPct(health.velocityPerWeek)}
+                </span>{' '}
+                per week.{' '}
+                {/* Not "the plan demands": this is the even pace that finishes
+                    on the contract's last week from here, not a figure off the
+                    plan curve, and naming it the plan's was a claim nobody
+                    could find on the plan. */}
+                {weeksLeft > 0 ? (
+                  <>
+                    Finishing by week {health.lastWeek} needs{' '}
+                    <span className="font-semibold text-foreground">
+                      {fmtPct(health.requiredVelocity)}
+                    </span>{' '}
+                    per week.
+                  </>
+                ) : (
+                  'This is the contract’s last week.'
+                )}
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card className="h-full">
+            <CardHeader>
+              <CardTitle className={TYPE.cardTitle}>Forecast</CardTitle>
+              <CardDescription className={TYPE.cardDesc}>
+                When the last activity finishes, from the schedule
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-1 flex-col">
+              {health.forecastFinishWeek === null ? (
+                <p className="text-sm text-muted-foreground">No schedule to forecast from yet.</p>
+              ) : (
+                <>
+                  <p
+                    className={cn(
+                      'text-3xl font-semibold tabular-nums',
+                      health.weeksAgainstContract === null
+                        ? ''
+                        : verdictText[verdictOf(health.weeksAgainstContract, 0)]
+                    )}
+                  >
+                    Week {Math.round(health.forecastFinishWeek)}
+                  </p>
+                  {health.weeksAgainstContract !== null && (
+                    <Badge
+                      variant="secondary"
+                      className={cn(
+                        'mt-2 w-fit',
+                        verdictChip[verdictOf(health.weeksAgainstContract, 0)]
+                      )}
+                    >
+                      {Math.round(health.weeksAgainstContract) === 0
+                        ? 'On the contract end'
+                        : `${Math.abs(Math.round(health.weeksAgainstContract))} weeks ${
+                            health.weeksAgainstContract > 0 ? 'earlier' : 'later'
+                          }`}
+                    </Badge>
+                  )}
+                  {/* Pinned to the bottom: the card is stretched to its
+                      neighbour's height. The track fills what was a hole the
+                      height of a hand, with the distance the badge states. */}
+                  <div className="mt-auto pt-5">
+                    <ForecastTrack
+                      week={health.week}
+                      forecastWeek={health.forecastFinishWeek}
+                      lastWeek={health.lastWeek}
+                    />
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      Contract ends in week {health.lastWeek}
+                    </p>
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </ScrollReveal>
+
+      <ScrollReveal>
+        <PriorityActionsCard
+          pa={priorities}
+          week={week}
+          canIssue={validation.canIssue}
+          errors={validation.errors}
+          warnings={validation.warnings}
+          plannerHref={`/projects/${projectId}`}
+        />
+      </ScrollReveal>
+    </div>
+  );
+}
+
+/** Whose numbers these are, and which week of them — on the gate too. */
+function DashboardHeader({
+  name,
+  customer,
+  reportedWeek,
+  weeks,
+  week,
+  currentWeek,
+  anchorEnd,
+}: {
+  name: string;
+  customer: string | undefined;
+  reportedWeek: number;
+  weeks: number[];
+  week: number;
+  currentWeek: number;
+  anchorEnd?: string;
+}) {
+  return (
+    <>
+    {/* Whose numbers these are, and which week of them. The name is here
+        rather than only in the sidebar because this page is what somebody
+        screenshots into a chat — and a percentage with no project on it is
+        the same trap the sidebar mismatch was. */}
+    {/* THE PICKER IS PINNED TOP RIGHT, LEVEL WITH THE FIRST LINE OF THE NAME.
+        That is where it was asked for on 10 September 2026, and both of the
+        obvious alternatives were tried and rejected on the way: bottom-
+        aligned it sat beside the customer line and read as belonging to that
+        line, and wrapped onto its own row it dropped below the heading
+        entirely — which this project's 100-character contract title
+        guarantees at every width, because the name alone fills the row.
+
+        So the name gets `flex-1 min-w-0` and wraps INSIDE its own column
+        rather than pushing the picker anywhere. Nothing here wraps. */}
+    {/* Below `sm` the name takes the whole row and the picker drops under it:
+        a 110px control beside a 20px-per-word contract title leaves the title
+        about 230px on a 390px phone, and clamping it to two lines there loses
+        the words that say which project this is. */}
+    <header className="animate-enter flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+      <div className="w-full min-w-0 sm:w-auto sm:flex-1">
+        <h1 className="line-clamp-2 text-xl font-semibold tracking-tight sm:text-2xl">
+          {tidyName(name)}
+        </h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {customer || 'No customer set'}
+          {/* The week used to be stated here too — ' · reported up to week 43' — and
+              once the picker beside it carries the Current badge that is the same
+              fact printed twice, disagreeing with itself on the one project whose
+              two stores disagree. The picker owns the week; the chip after this
+              line owns how far the figures actually go. */}
+          {/* `currentWeek` was in this test until 17 Sep 2026, when it stopped
+              meaning "somebody filed something" and started meaning "the week the
+              calendar says we are in", which is never zero. Leaving it here would
+              have retired this line permanently. Only the REPORTED week can say
+              whether anything has been reported. */}
+          {reportedWeek > 0 ? '' : ' · Nothing reported yet'}
+          {/* WHERE THE FIGURES STOP, ON A LINE THAT IS ALWAYS THERE. It was a
+              full-width banner between this header and the hero, so crossing
+              the last reported week pushed every card down 50px and back up
+              again, which read as a bug (25 Oct 2026). On this line it takes
+              no height when absent and none when present: `h-5` is the line's
+              own `text-sm` height, border included. */}
+          {reportedWeek > 0 && week > reportedWeek && (
+            <span className="ml-2 inline-flex h-5 animate-fade-in-up items-center whitespace-nowrap rounded-md border border-warn/30 bg-warn-soft px-1.5 align-top text-xs font-medium leading-none text-warn">
+              No report since week {reportedWeek}
+            </span>
+          )}
+        </p>
+      </div>
+      {/* Data Overall's row is 312px at desktop and the screen's width on a
+          phone; this matches it so the seat is the same size in both. */}
+      <div className="w-full shrink-0 sm:w-78">
+        <DashboardWeekBar
+          weeks={weeks}
+          selectedWeek={week}
+          projectCurrentWeek={currentWeek}
+          anchorEnd={anchorEnd}
+        />
+      </div>
+    </header>
+    </>
+  );
+}
+
+/** One cell of the hero's rail. Label above, figure below, divider between. */
+function Stat({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    // The rail is three fixed 1fr columns, so a figure that outgrows its
+    // track spills over the divider into the next one. At 390 (the width this
+    // card is designed at) it fits; at 360 '71.93%' ran 8px past. Both tweaks
+    // are scoped BELOW 380px so the hero keeps its frozen proportions on every
+    // phone that can afford them.
+    <div className="flex flex-col justify-between px-3 py-3 first:pl-4 last:pr-4 max-[380px]:px-2">
+      <dt className={TYPE.statLabel}>{label}</dt>
+      <dd className={cn('mt-1 max-[380px]:text-lg', TYPE.figure)}>{value}</dd>
+    </div>
+  );
+}
+
+/**
+ * Nothing to draw, and a way forward — never a chart of zeroes.
+ *
+ * The card, its size and its position are `EmptyState`, the same one Weekly,
+ * Daily, Reports and Klaim use. This used to be a 2xl headline pinned near the
+ * top of the page instead, which meant a project with no plan was told so in
+ * one shape on the dashboard and another the moment it moved one tab across.
+ */
+function Empty({
+  icon,
+  title,
+  body,
+  href,
+  cta,
+}: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  href: string;
+  cta: string;
+}) {
+  return (
+    <EmptyState icon={icon} title={title} body={body} primary={{ href, label: cta }} />
+  );
+}
+
+
+/**
+ * What the shell paints while the request-time render arrives. It mirrors the
+ * hero and the first two cards rather than showing a spinner, so the page does
+ * not jump height when the real thing lands.
+ */
+function DashboardSkeleton() {
+  return (
+    <div className="mx-auto max-w-6xl space-y-4 px-3 py-5 sm:p-6 lg:p-8">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="w-full max-w-md space-y-2">
+          <Skeleton className="h-7 w-3/4" />
+          <Skeleton className="h-4 w-1/2" />
+        </div>
+        <Skeleton className="h-11 w-28 rounded-lg" />
+      </div>
+      <Skeleton className="h-72 w-full rounded-xl" />
+      <Skeleton className="h-52 w-full rounded-xl" />
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Skeleton className="h-56 w-full rounded-xl lg:col-span-2" />
+        <Skeleton className="h-56 w-full rounded-xl" />
+      </div>
+    </div>
+  );
+}
