@@ -105,7 +105,11 @@ function forecastOf(n: {
 // full set of DB queries runs twice per render.
 export const buildProjectDashboardData = cache(async (projectId: string): Promise<ProjectDashboardData | null> => {
   // Run all independent queries in parallel — was 5 sequential round-trips.
-  const [projects, nodes, weekRows, msRows, baselineRows] = await Promise.all([
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`DB timeout loading project ${projectId}`)), 10_000)
+  );
+  const [projects, nodes, weekRows, msRows, baselineRows] = await Promise.race([
+    Promise.all([
     db.select().from(schema.projects).where(eq(schema.projects.id, projectId)),
     db.select().from(schema.wbsNodes).where(eq(schema.wbsNodes.projectId, projectId)).orderBy(asc(schema.wbsNodes.order)),
     db.select().from(schema.weeks).where(eq(schema.weeks.projectId, projectId)).orderBy(asc(schema.weeks.weekNo)),
@@ -126,6 +130,8 @@ export const buildProjectDashboardData = cache(async (projectId: string): Promis
     db.select({ id: schema.baselines.id, kind: schema.baselines.kind })
       .from(schema.baselines)
       .where(eq(schema.baselines.projectId, projectId)),
+    ]),
+    timeout,
   ]);
 
   const project = projects[0];
