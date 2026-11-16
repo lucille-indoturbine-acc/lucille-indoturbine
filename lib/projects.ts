@@ -10,6 +10,7 @@
  */
 import { and, asc, count, desc, eq, isNull, sql } from 'drizzle-orm';
 import { cookies } from 'next/headers';
+import { cache } from 'react';
 
 import { deriveInitial } from './initial';
 import { db } from './pg';
@@ -80,7 +81,9 @@ export interface ProjectCard {
  * one. `lib/workspace.ts:52` has refused to leave the app empty since the JSON
  * days; this keeps that promise.
  */
-export async function getActiveProjectId(): Promise<string | null> {
+// cache() deduplicates calls within the same request — the sidebar and the
+// page body both call this, so without it the DB is hit twice per render.
+export const getActiveProjectId = cache(async (): Promise<string | null> => {
   const jar = await cookies();
   const chosen = jar.get(OPEN_PROJECT_COOKIE)?.value;
   if (chosen && (await isOpenable(chosen))) return chosen;
@@ -99,17 +102,17 @@ export async function getActiveProjectId(): Promise<string | null> {
     .orderBy(asc(schema.projects.createdAt))
     .limit(1);
   return first[0]?.id ?? null;
-}
+});
 
 /** Live and not archived — the two ways a stored pointer goes bad. */
-async function isOpenable(id: string): Promise<boolean> {
+const isOpenable = cache(async (id: string): Promise<boolean> => {
   const rows = await db
     .select({ id: schema.projects.id, archivedAt: schema.projects.archivedAt })
     .from(schema.projects)
     .where(eq(schema.projects.id, id))
     .limit(1);
   return rows.length > 0 && !rows[0].archivedAt;
-}
+});
 
 export async function getProject(projectId: string) {
   const rows = await db

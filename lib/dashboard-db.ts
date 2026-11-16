@@ -31,6 +31,7 @@
  * reported from reading as a collapse to zero.
  */
 import { asc, eq, inArray } from 'drizzle-orm';
+import { cache } from 'react';
 
 import { leafPlanFraction } from './plan-curve';
 import { db } from './pg';
@@ -99,7 +100,10 @@ function forecastOf(n: {
   };
 }
 
-export async function buildProjectDashboardData(projectId: string): Promise<ProjectDashboardData | null> {
+// cache() deduplicates within a request — the sidebar (getOpenProjectStatus)
+// and the page body both call this for the same projectId, so without it the
+// full set of DB queries runs twice per render.
+export const buildProjectDashboardData = cache(async (projectId: string): Promise<ProjectDashboardData | null> => {
   // Run all independent queries in parallel — was 5 sequential round-trips.
   const [projects, nodes, weekRows, msRows, baselineRows] = await Promise.all([
     db.select().from(schema.projects).where(eq(schema.projects.id, projectId)),
@@ -418,4 +422,4 @@ export async function buildProjectDashboardData(projectId: string): Promise<Proj
     hasSchedule: nodes.length > 0 && weekRows.length > 0,
     currency: project.currency,
   };
-}
+});
