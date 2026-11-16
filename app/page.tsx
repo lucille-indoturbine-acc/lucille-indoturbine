@@ -30,7 +30,7 @@ import PriorityActionsCard from '@/components/dashboard/PriorityActionsCard';
 import { buildPriorityActions, LOOK_AHEAD_WEEKS } from '@/lib/priority-actions';
 import { buildWorklist } from '@/lib/worklist';
 import { currentWeekOf } from '@/lib/current-week';
-import { getOpenDb, getWeekRollup } from '@/lib/data';
+import { getWeekRollup } from '@/lib/data';
 import { buildProjectDashboardData } from '@/lib/dashboard-db';
 import { getActiveProjectId } from '@/lib/projects';
 import { buildSCurveSeries } from '@/lib/scurve';
@@ -176,28 +176,11 @@ async function DashboardBody({ searchParams }: { searchParams: Promise<{ week?: 
     );
   }
 
-  // THE FIGURES COME FROM THE STORE THE PROJECT READS, not from whichever one
-  // this page can reach. `getOpenDb()` is that fork — the imported project reads
-  // db.json, every other project reads SQLite — and Weekly Progress, Data
-  // Overall and the printed report have gone through it for months. This page
-  // went straight to the SQLite adapter instead, and the two stores do not
-  // agree: on Gundih it drew week 36 as 68.20 against 72.57 while every other
-  // screen drew the same week of the same project as 70.39 against 71.93. The
-  // front page was the one number nobody else could reproduce.
-  //
-  // `buildProjectDashboardData` still answers for the PROJECT — whether it has
-  // weights at all, and the currency and contract value its money is priced in.
-  // Those belong to the project rather than to a week, they are the same in
-  // either store, and db.json simply never had a field for them.
-  const openDb = await getOpenDb();
-  const db = {
-    ...openDb,
-    project: {
-      ...openDb.project,
-      contractValue: openDb.project.contractValue ?? data.db.project.contractValue,
-      projectBudget: openDb.project.projectBudget ?? data.db.project.projectBudget,
-    },
-  };
+  // `data.db` already IS the SQLite database for this project — calling
+  // getOpenDb() would just call buildProjectDashboardData a second time for the
+  // same project. Use data.db directly. (Gundih's db.json fork was removed
+  // 26 Sep 2026; every project reads SQLite now.)
+  const db = data.db;
 
   // TWO WEEKS, AND THEY ANSWER DIFFERENT QUESTIONS. Holding one number for both
   // is what made this screen disagree with itself.

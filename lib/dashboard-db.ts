@@ -100,40 +100,33 @@ function forecastOf(n: {
 }
 
 export async function buildProjectDashboardData(projectId: string): Promise<ProjectDashboardData | null> {
-  const projects = await db
-    .select()
-    .from(schema.projects)
-    .where(eq(schema.projects.id, projectId));
-  const project = projects[0];
-  if (!project) return null;
-
-  const nodes = await db
-    .select()
-    .from(schema.wbsNodes)
-    .where(eq(schema.wbsNodes.projectId, projectId))
-    .orderBy(asc(schema.wbsNodes.order));
-
-  const weekRows = await db
-    .select()
-    .from(schema.weeks)
-    .where(eq(schema.weeks.projectId, projectId))
-    .orderBy(asc(schema.weeks.weekNo));
-
-  // Milestones ride along, because a milestone item's percentage IS its
-  // milestones — `resolveLeafProgress` reads them off the item, and without
-  // them every milestone leaf resolves to zero no matter what was recorded.
-  const msRows = await db
-    .select({
+  // Run all independent queries in parallel — was 5 sequential round-trips.
+  const [projects, nodes, weekRows, msRows, baselineRows] = await Promise.all([
+    db.select().from(schema.projects).where(eq(schema.projects.id, projectId)),
+    db.select().from(schema.wbsNodes).where(eq(schema.wbsNodes.projectId, projectId)).orderBy(asc(schema.wbsNodes.order)),
+    db.select().from(schema.weeks).where(eq(schema.weeks.projectId, projectId)).orderBy(asc(schema.weeks.weekNo)),
+    // Milestones ride along, because a milestone item's percentage IS its
+    // milestones — `resolveLeafProgress` reads them off the item, and without
+    // them every milestone leaf resolves to zero no matter what was recorded.
+    db.select({
       id: schema.milestones.id,
       nodeId: schema.milestones.nodeId,
       label: schema.milestones.label,
       weight: schema.milestones.weight,
       order: schema.milestones.order,
     })
-    .from(schema.milestones)
-    .innerJoin(schema.wbsNodes, eq(schema.wbsNodes.id, schema.milestones.nodeId))
-    .where(eq(schema.wbsNodes.projectId, projectId))
-    .orderBy(asc(schema.milestones.order));
+      .from(schema.milestones)
+      .innerJoin(schema.wbsNodes, eq(schema.wbsNodes.id, schema.milestones.nodeId))
+      .where(eq(schema.wbsNodes.projectId, projectId))
+      .orderBy(asc(schema.milestones.order)),
+    db.select({ id: schema.baselines.id, kind: schema.baselines.kind })
+      .from(schema.baselines)
+      .where(eq(schema.baselines.projectId, projectId)),
+  ]);
+
+  const project = projects[0];
+  if (!project) return null;
+
   const msByNode = new Map<string, { id: string; label: string; weight: number }[]>();
   for (const m of msRows) {
     const list = msByNode.get(m.nodeId);
@@ -181,47 +174,38 @@ export async function buildProjectDashboardData(projectId: string): Promise<Proj
   // Dates come from the ACTIVE baseline, like every other reader: the
   // contractual one is claim material, this is how the work is being managed.
   // (Inlined from getActiveBaselineId in lib/sheet.ts to avoid circular migration.)
-  const baselineRows = await db
-    .select({ id: schema.baselines.id, kind: schema.baselines.kind })
-    .from(schema.baselines)
-    .where(eq(schema.baselines.projectId, projectId));
   const baselineId =
     baselineRows.find((b) => b.kind === 'active')?.id ?? baselineRows[0]?.id ?? null;
 
-  const schedules = baselineId
-    ? await db
-        .select()
-        .from(schema.nodeSchedules)
-        .where(eq(schema.nodeSchedules.baselineId, baselineId))
-    : [];
-  const dates = new Map(schedules.map((s) => [s.nodeId, s]));
-
   const leafIds = new Set(nodes.filter((n) => n.isLeaf).map((n) => n.id));
   const weekIds = weekRows.map((w) => w.id);
-  const progress = weekIds.length
-    ? await db
-        .select()
-        .from(schema.leafProgress)
-        .where(inArray(schema.leafProgress.weekId, weekIds))
-    : [];
 
-  // The EVIDENCE, not just the percentage. `lib/progress.ts` is the single
-  // origin of a leaf's figure and it reads `qtyDone`/`milestonesDone` off the
-  // snapshot; dropping them here meant the Fill in screen showed an empty
-  // quantity box over a leaf that had one recorded, and re-saving it would
-  // have written that emptiness back.
-  const msDone = weekIds.length
-    ? await db
-        .select({
+  // Run the remaining dependent queries in parallel — was 3 more sequential round-trips.
+  const [schedules, progress, msDone] = await Promise.all([
+    baselineId
+      ? db.select().from(schema.nodeSchedules).where(eq(schema.nodeSchedules.baselineId, baselineId))
+      : Promise.resolve([]),
+    weekIds.length
+      ? db.select().from(schema.leafProgress).where(inArray(schema.leafProgress.weekId, weekIds))
+      : Promise.resolve([]),
+    // The EVIDENCE, not just the percentage. `lib/progress.ts` is the single
+    // origin of a leaf's figure and it reads `qtyDone`/`milestonesDone` off the
+    // snapshot; dropping them here meant the Fill in screen showed an empty
+    // quantity box over a leaf that had one recorded, and re-saving it would
+    // have written that emptiness back.
+    weekIds.length
+      ? db.select({
           weekId: schema.milestoneProgress.weekId,
           milestoneId: schema.milestoneProgress.milestoneId,
           achieved: schema.milestoneProgress.achieved,
           nodeId: schema.milestones.nodeId,
         })
-        .from(schema.milestoneProgress)
-        .innerJoin(schema.milestones, eq(schema.milestones.id, schema.milestoneProgress.milestoneId))
-        .where(inArray(schema.milestoneProgress.weekId, weekIds))
-    : [];
+          .from(schema.milestoneProgress)
+          .innerJoin(schema.milestones, eq(schema.milestones.id, schema.milestoneProgress.milestoneId))
+          .where(inArray(schema.milestoneProgress.weekId, weekIds))
+      : Promise.resolve([]),
+  ]);
+  const dates = new Map(schedules.map((s) => [s.nodeId, s]));
 
   const byWeek = new Map<
     string,
