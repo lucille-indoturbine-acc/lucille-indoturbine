@@ -1,3 +1,5 @@
+import { randomBytes } from 'crypto';
+
 import { NextResponse } from 'next/server';
 
 import { getSession } from '@/lib/auth/get-session';
@@ -74,8 +76,6 @@ export async function POST(req: Request) {
   const { data: existing } = await supabase.auth.admin.listUsers({ perPage: 500 });
   const existingIds = new Set((existing?.users ?? []).map((u) => u.id));
 
-  const origin = process.env.NEXT_PUBLIC_APP_URL ?? process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000';
-
   const submittedIds = new Set(body.accounts.map((a) => a.id));
 
   for (const a of body.accounts) {
@@ -88,13 +88,19 @@ export async function POST(req: Request) {
       });
       if (updateErr) return NextResponse.json({ error: updateErr.message }, { status: 500 });
     } else {
-      // New account: send invitation email so the user sets their own password.
-      // redirectTo goes straight to /login; the hash token is handled client-side there.
-      const { error: inviteErr } = await supabase.auth.admin.inviteUserByEmail(a.email, {
-        data: meta,
-        redirectTo: `${origin}/login`,
+      // New account: create directly with a generated password and confirm the
+      // email server-side so no email is needed.
+      // The Master shares the generated password in-app (visible via the
+      // "Current password" reveal in Account panel).
+      const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+      const pwd = Array.from(randomBytes(10), (b) => chars[b % chars.length]).join('');
+      const { error: createErr } = await supabase.auth.admin.createUser({
+        email: a.email,
+        password: pwd,
+        email_confirm: true,
+        user_metadata: { ...meta, _pw: pwd },
       });
-      if (inviteErr) return NextResponse.json({ error: `Could not invite ${a.email}: ${inviteErr.message}` }, { status: 500 });
+      if (createErr) return NextResponse.json({ error: `Could not create ${a.email}: ${createErr.message}` }, { status: 500 });
     }
   }
 

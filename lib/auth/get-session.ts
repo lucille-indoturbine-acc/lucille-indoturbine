@@ -28,9 +28,12 @@ export async function getSession(): Promise<Session | null> {
       },
     }
   );
+  // proxy.ts (middleware) already called getUser() to validate the JWT with
+  // Supabase. Here we only need to read the already-validated session from the
+  // cookie — getSession() does that without a second network round-trip.
   const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return null;
-  return { userId: user.id, email: user.email ?? '' };
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.user) return null;
+  return { userId: session.user.id, email: session.user.email ?? '' };
 }
