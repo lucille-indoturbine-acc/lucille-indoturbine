@@ -1,3 +1,4 @@
+import { cache } from 'react';
 import { cacheLife, cacheTag } from 'next/cache';
 import { readJsonProject, readWorkspace } from './db';
 import {
@@ -42,7 +43,9 @@ export interface WeekRollup {
   grandTotal: GrandTotal;
 }
 
-export function getWeekRollup(db: Database, week: number): WeekRollup | null {
+// cache() deduplicates within a request — getOpenProjectStatus and computeHealth
+// both call this for every week; without it the rollup runs twice per week per request.
+export const getWeekRollup = cache((db: Database, week: number): WeekRollup | null => {
   const meta = getWeekMeta(db, week);
   if (!meta) return null;
   const prevMeta = getPrevWeekMeta(db, week);
@@ -50,7 +53,7 @@ export function getWeekRollup(db: Database, week: number): WeekRollup | null {
     computeRollup(db.wbsItems, meta.leafData, prevMeta?.leafData ?? null)
   );
   return { meta, prevMeta, roots, grandTotal: computeGrandTotal(roots) };
-}
+});
 
 /**
  * The project list for the sidebar.
