@@ -1,4 +1,5 @@
 import { Suspense } from 'react';
+import { connection } from 'next/server';
 
 import { RouteTransition } from '@/components/motion/RouteTransition';
 import SectionSkeleton from '@/components/ui/SectionSkeleton';
@@ -37,9 +38,13 @@ export default function DailyListPage() {
 }
 
 async function DailyListBody() {
-
+  // connection() is the explicit request-data marker that cacheComponents
+  // requires before any new Date() call. getActiveProjectId() skips cookies()
+  // during `next build` (NEXT_PHASE check), so without this the clock reads at
+  // lines ~60 and ~68 fail: "used new Date() before accessing uncached data".
+  await connection();
   const db = await getOpenJsonDb();
-  // After the cookie read above, so the clock the status reads is allowed.
+  // After the connection() + cookie read above, the clock is allowed.
   const grid = await getOpenWeekGrid();
   const sorted = [...db.daily].sort((a, b) => b.date.localeCompare(a.date));
   // The days are grouped by the week they fall in ("Week 40, 28 Sep to 4 Oct"). Nobody
