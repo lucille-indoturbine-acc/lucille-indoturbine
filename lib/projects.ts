@@ -84,6 +84,14 @@ export interface ProjectCard {
 // cache() deduplicates calls within the same request — the sidebar and the
 // page body both call this, so without it the DB is hit twice per render.
 export const getActiveProjectId = cache(async (): Promise<string | null> => {
+  // During static generation (`next build`), there is no request and therefore
+  // no cookie. Even with per-query timeouts, every hung Postgres connection
+  // stays open until the pool is exhausted, and subsequent pages then wait
+  // indefinitely for a free slot — the Promise.race never starts because the
+  // library queues the request before creating the promise. Skip ALL DB work
+  // during build; pages render as notFound() and the build completes fast.
+  if (process.env.NEXT_PHASE === 'phase-production-build') return null;
+
   const jar = await cookies();
   const chosen = jar.get(OPEN_PROJECT_COOKIE)?.value;
   if (chosen && (await isOpenable(chosen))) return chosen;
