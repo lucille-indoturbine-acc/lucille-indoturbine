@@ -1,6 +1,4 @@
 import { getOpenWeekRollup, getOpenDb } from '@/lib/data';
-import { db } from '@/lib/pg';
-import * as schema from '@/lib/schema';
 import { validateWeek } from '@/lib/analysis';
 import { weightGate } from '@/lib/weight-gate';
 import { summariseUnits } from '@/lib/rollup';
@@ -27,23 +25,12 @@ export const unstable_instant = {
 };
 
 export async function generateStaticParams(): Promise<{ week: string }[]> {
-  // This runs at BUILD time, where there is no request and therefore no open
-  // project. It only decides which week numbers get a prerendered shell: every
-  // week number any project in the database has. A week outside the list still
-  // renders — the params are a head start, not a whitelist. It read db.json's
-  // imported project until that project was removed (26 Sep 2026), which gave
-  // the deployment weeks 1–60; that floor is kept so no week the live project
-  // used to be served prerendered is served differently now. A deployment
-  // builds against data/seed.db, whose plans are shorter than the live ones.
-  let last = 60;
-  try {
-    const rows = await db.select({ n: schema.weeks.weekNo }).from(schema.weeks);
-    if (rows.length) last = Math.max(60, ...rows.map((w) => w.n));
-  } catch {
-    // DB unreachable during build — prerender 60 weeks; unknown weeks still
-    // render on demand so this is a head start, not a whitelist.
-  }
-  return Array.from({ length: last }, (_, i) => ({ week: String(i + 1) }));
+  // Return empty: pre-generating 60+ weeks triggers 60+ × N build-time
+  // validation renders (one per sub-page per week), each hitting connection()
+  // inside LegacyChromeGate and timing out at 60 s. Pages render on-demand
+  // instead — dynamicParams defaults to true so every valid week still works,
+  // and Vercel caches after the first visit.
+  return [];
 }
 
 /**
