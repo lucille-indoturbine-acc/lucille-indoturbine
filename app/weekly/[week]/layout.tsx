@@ -30,7 +30,8 @@ export async function generateStaticParams(): Promise<{ week: string }[]> {
   // inside LegacyChromeGate and timing out at 60 s. Pages render on-demand
   // instead — dynamicParams defaults to true so every valid week still works,
   // and Vercel caches after the first visit.
-  return [];
+  // cacheComponents requires at least one entry (EmptyGenerateStaticParamsError).
+  return [{ week: '1' }];
 }
 
 /**
