@@ -6,7 +6,7 @@
 import { connection } from 'next/server';
 import { NextResponse } from 'next/server';
 
-import { sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 
 import { db } from '@/lib/pg';
 import * as schema from '@/lib/schema';
@@ -76,6 +76,65 @@ export async function GET() {
         sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'projects' ORDER BY ordinal_position`
       )
     );
+
+    // ---- targeted tests: exact queries the project page runs ----
+    // These run sequentially so we know WHICH query fails, not just that something did.
+    if (rows.length > 0) {
+      const pid = rows[0].id;
+      await timed('p_wbs_by_project', () =>
+        db.select().from(schema.wbsNodes).where(eq(schema.wbsNodes.projectId, pid))
+      );
+      await timed('p_baselines_by_project', () =>
+        db.select().from(schema.baselines).where(eq(schema.baselines.projectId, pid))
+      );
+      await timed('p_weeks_by_project', () =>
+        db.select().from(schema.weeks).where(eq(schema.weeks.projectId, pid))
+      );
+      await timed('p_milestones_join', () =>
+        db.select({
+          id: schema.milestones.id,
+          nodeId: schema.milestones.nodeId,
+          label: schema.milestones.label,
+          weight: schema.milestones.weight,
+          order: schema.milestones.order,
+        })
+          .from(schema.milestones)
+          .innerJoin(schema.wbsNodes, eq(schema.wbsNodes.id, schema.milestones.nodeId))
+          .where(eq(schema.wbsNodes.projectId, pid))
+      );
+      await timed('p_node_schedules_join_sql', () =>
+        db.execute(
+          sql`select count(distinct s.node_id) as n from node_schedules s join wbs_nodes n on n.id = s.node_id where n.project_id = ${pid}`
+        )
+      );
+      await timed('p_leaf_progress_in', async () => {
+        const wkRows = await db.select({ id: schema.weeks.id }).from(schema.weeks).where(eq(schema.weeks.projectId, pid));
+        const ids = wkRows.map((r) => r.id);
+        if (!ids.length) return [];
+        return db.select().from(schema.leafProgress).where(inArray(schema.leafProgress.weekId, ids));
+      });
+      // Concurrent: simulates what the project page does (many queries at once)
+      await timed('p_concurrent_all', () =>
+        Promise.all([
+          db.select().from(schema.projects).where(eq(schema.projects.id, pid)),
+          db.select().from(schema.wbsNodes).where(eq(schema.wbsNodes.projectId, pid)),
+          db.select().from(schema.weeks).where(eq(schema.weeks.projectId, pid)),
+          db.select().from(schema.baselines).where(eq(schema.baselines.projectId, pid)),
+          db.execute(sql`select count(distinct s.node_id) as n from node_schedules s join wbs_nodes n on n.id = s.node_id where n.project_id = ${pid}`),
+          db.select({
+            id: schema.milestones.id,
+            nodeId: schema.milestones.nodeId,
+            label: schema.milestones.label,
+            weight: schema.milestones.weight,
+            order: schema.milestones.order,
+          })
+            .from(schema.milestones)
+            .innerJoin(schema.wbsNodes, eq(schema.wbsNodes.id, schema.milestones.nodeId))
+            .where(eq(schema.wbsNodes.projectId, pid)),
+        ])
+      );
+    }
+
     projects = {
       count: rows.length,
       ids: rows.map((r) => r.id),
