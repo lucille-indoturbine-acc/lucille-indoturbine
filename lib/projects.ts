@@ -88,20 +88,30 @@ export const getActiveProjectId = cache(async (): Promise<string | null> => {
   const chosen = jar.get(OPEN_PROJECT_COOKIE)?.value;
   if (chosen && (await isOpenable(chosen))) return chosen;
 
-  const state = await db
-    .select({ activeProjectId: schema.appState.activeProjectId })
-    .from(schema.appState)
-    .where(eq(schema.appState.id, 'singleton'));
-  const stateId = state[0]?.activeProjectId;
+  // Guard: at build time (static page generation) these queries can hang
+  // when the DB is unreachable. A 5s timeout lets the build return null
+  // quickly → notFound() → build completes. At runtime 5s is plenty.
+  const withTimeout = <T>(p: Promise<T>): Promise<T | null> =>
+    Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), 5000))]);
+
+  const stateRows = await withTimeout(
+    db
+      .select({ activeProjectId: schema.appState.activeProjectId })
+      .from(schema.appState)
+      .where(eq(schema.appState.id, 'singleton'))
+  );
+  const stateId = stateRows?.[0]?.activeProjectId;
   if (stateId && (await isOpenable(stateId))) return stateId;
 
-  const first = await db
-    .select({ id: schema.projects.id })
-    .from(schema.projects)
-    .where(isNull(schema.projects.archivedAt))
-    .orderBy(asc(schema.projects.createdAt))
-    .limit(1);
-  return first[0]?.id ?? null;
+  const firstRows = await withTimeout(
+    db
+      .select({ id: schema.projects.id })
+      .from(schema.projects)
+      .where(isNull(schema.projects.archivedAt))
+      .orderBy(asc(schema.projects.createdAt))
+      .limit(1)
+  );
+  return firstRows?.[0]?.id ?? null;
 });
 
 /** Live and not archived — the two ways a stored pointer goes bad. */
