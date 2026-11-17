@@ -7,8 +7,7 @@ import { weekOfDate } from '@/lib/weeks';
 import { getOpenJsonDb, getOpenWeekGrid } from '@/lib/data';
 import DailyReportsView from '@/components/daily/DailyReportsView';
 
-function nextDateAfter(lastDate: string | undefined): string {
-  if (!lastDate) return new Date().toISOString().slice(0, 10);
+function nextDateAfter(lastDate: string): string {
   const d = new Date(`${lastDate}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + 1);
   return d.toISOString().slice(0, 10);
@@ -63,7 +62,10 @@ async function DailyListBody() {
   const lastWeek = Math.max(grid?.lastWeek ?? 0, ...reportWeeks, 0);
   const weekLabels: Record<number, string> = {};
   for (let w = lastWeek; w >= 1; w--) weekLabels[w] = weekRangeLabel(anchor, w);
-  const defaultDate = nextDateAfter(sorted[0]?.date);
+  // new Date() is after getOpenJsonDb() (a cookie read) — allowed by cacheComponents.
+  const defaultDate = sorted[0]?.date
+    ? nextDateAfter(sorted[0].date)
+    : new Date().toISOString().slice(0, 10);
 
   // No entrance on the wrapper at all: the RouteTransition fades this whole
   // block on a navigation and the list rows do their own staggered rise, so a
