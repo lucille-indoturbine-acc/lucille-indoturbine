@@ -14,6 +14,9 @@ export const unstable_instant = {
   // refuses any read it has not been told about. A null value samples the
   // visitor who has never chosen a project.
   samples: [{ params: { week: '1' }, cookies: [{ name: 'figtries_open_project', value: null }] }],
+  // connection() inside LegacyGate hangs during the build-time sample render
+  // on this layout (same as ?only= under /print/weekly and ?lens= in overall).
+  unstable_disableValidation: true,
 };
 
 /**
